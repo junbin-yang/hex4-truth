@@ -2,7 +2,7 @@
 
 > 三态确定性计算 · 扩展运算与嵌入式应用仓库
 
-> **衍生声明**：HEX4-Truth 是基于 [HEX4-Lift IP Core](https://github.com/hex4/hex4-lift-ip)
+> **衍生声明**：HEX4-Truth 是基于 [HEX4-Lift IP Core](https://gitcode.com/zzwgbdt/hex4-lift-ip)
 > (Apache-2.0) 的衍生项目，新增 13 种扩展运算、纯 C 参考实现 (clib) 与
 > ESP32-S3 ULP 三态确定性值守组件。
 
