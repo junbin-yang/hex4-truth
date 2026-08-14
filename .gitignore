@@ -1,0 +1,20 @@
+# ESP32 build environment & artifacts (SDK not in repo)
+esp32s3_hex4_ulp/esp-idf/
+esp32s3_hex4_ulp/project/build/
+
+# C library build artifacts
+clib/*.o
+clib/*.a
+clib/test_hex4_core
+
+# Verilog simulation artifacts
+hdl/sim/output_sim/
+*.vvp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
