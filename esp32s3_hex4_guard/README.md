@@ -151,6 +151,79 @@ python3 ../tools/guard_cmd.py /dev/ttyACM1 ping operator
 前者由上位机触发、判定表决定; 后者恒在后台循环、由物理量决定;
 两者在**执行前**与**执行中**两个时刻汇合, 保证任何一条链路异常都不放行动作。
 
+### 2.5 场景: 电池值守(无上位机, 纯 ULP 模式)
+
+**场景设定**: 电池供电节点, 无上位机、无串口指令, 设备仅负责传感器值守与
+灯态指示(如冷链柜温度超限告警)。
+
+**运行逻辑**: 判定链与 UART 完全不参与; ULP-RISC-V 独立完成
+"ADC 采样 → 三态化 → 阈值告警 → 灯态", 主 CPU 可选择休眠(µW 级)或照常运行。
+
+**配置**(demo 顶部宏 + ULP 参数):
+
+```c
+#define GUARD_LINK_LOST_MS 0        /* 断线检测禁用 (无上位机) */
+/* hex4_ulp_cfg:
+   ulp_cfg.sleep_mode = HEX4_ULP_SLEEP_DEEP;   // 深睡眠值守 (µW 级, USB 断开)
+   // 或保持 HEX4_ULP_SLEEP_NONE (主 CPU 运行, 灯态轮询照常)
+   ulp_cfg.watch_period_us = 100000;           // 100ms 值守, 更低功耗
+   ulp_cfg.heartbeat_period = 600;             // 60s 心跳 (可选) */
+```
+
+**接线**: 仅传感器接 ADC1_CH0(GPIO1), 无需任何串口线;
+观察 WS2812 灯态(绿/黄/红/红闪)即可。此场景完整复用
+[`hex4_ulp`](../esp32s3_hex4_ulp/components/hex4_ulp/README.md) 组件的休眠值守能力
+(深睡眠 + ULP 唤醒), 与本监控器的判定链解耦。
+
+### 2.6 场景: 部署形态接 RK3588
+
+**场景设定**: RK3588 作为上位机, 经排针 UART1(TTL)下发指令并接收回执;
+监控器部署在工业联锁场景(阀门/传送带等)。
+
+**物理接线**(UART1 @ GPIO17/18, 排针 J1):
+
+```
+RK3588 UART (TTL 3.3V)             YD-ESP32-S3 排针 J1
+    TXD ─────────────────────────► GPIO18 (UART1 RX)
+    RXD ◄───────────────────────── GPIO17 (UART1 TX)
+    GND ────────────────────────── GND (必须共地)
+```
+
+**设备侧配置**(demo 顶部宏, 一行切换):
+
+```c
+#define GUARD_LINK_UART   UART_NUM_1
+#define GUARD_LINK_TX     17
+#define GUARD_LINK_RX     18
+#define GUARD_LINK_LOST_MS 5000     /* 部署形态: 断线安全停止启用 */
+```
+
+**RK3588 侧**(直接复用本仓库脚本逻辑, 换串口设备名即可):
+
+```bash
+python3 guard_keepalive.py /dev/ttyS1        # 每 1s ping 保活 (防断线红灯)
+python3 guard_cmd.py /dev/ttyS1 motor_run operator speed=50
+# 注意: ROLES/ACTIONS 表与设备侧 guard_permissions.c 保持一致 (生产经 eFuse 注入)
+```
+
+**上位机职责**(按 §4 协议):
+
+1. 上电后轮询 ping, 直到回执 `selftest=PASS`(设备就绪信号);
+2. 每 1s ping 保活(断线窗口 5s, 超时设备自动紧急停止 + 红灯锁存);
+3. 发执行类指令前检查 `state.sensor`(T2/TC 会被设备拒为 DENY/L4, 可提前规避);
+4. 回执是唯一事实来源: `ALLOW+exec_ok=true`=已执行, `DENY`=未执行,
+   `ABORTED`=执行中被物理中止。
+
+**与开发调试形态的差异**:
+
+| 项 | 开发调试(§2.4) | 部署形态(本节) |
+|---|---|---|
+| 指令链路 | UART0 经板载 CH343(USB) | UART1 排针 TTL 直连上位机 |
+| 日志 console | USB-Serial-JTAG(USB2) | 同左(排针仅走指令) |
+| 断线检测 | 可按需置 0 | **5000ms 必开**(安全停止) |
+| 传感器 | 杜邦线模拟 | 真实传感器接 GPIO1(ADC1_CH0) |
+| 门控输出 | 仅灯 | 灯 + 门控 GPIO 接执行器使能端(外部默认安全电平) |
+
 ## 3. 使用方集成
 
 1. **定义动作集与权限表** — 编辑 `components/hex4_guard/guard_permissions.c`:
