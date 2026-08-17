@@ -194,26 +194,53 @@ static int role_key_from_efuse(esp_efuse_block_t block, uint8_t key[32]) {
 
 ### 7.3 Secure Boot V2 + Flash Encryption(固件保护)
 
+**"不可逆"指 eFuse 安全位, 不是烧录能力**:
+
+- eFuse 是一次性可编程 (OTP): 烧过的 bit 不能再改回;
+- 锁定后**固件仍可反复烧录**, 但必须满足: Secure Boot 签名 + Flash Encryption 加密通道;
+- **只有烧 `DIS_DOWNLOAD_MODE` 才会彻底禁用串口烧录** (售后返修不建议烧该项,
+  物理接口防护替代; 若烧了, 固件更新只能走 OTA)。
+
+**分层策略**(按产品阶段渐进, 每阶段可回退):
+
+| 阶段 | 配置 | 目的 |
+|---|---|---|
+| 开发调试 | 全部关闭 (当前 demo 状态) | 快速迭代 |
+| 试点/小批量 | 仅角色密钥 eFuse + RD_DIS (§7.2) | 认证强化, 保留烧录自由 |
+| 量产 | + Flash Encryption Release + Secure Boot V2 | 固件保护 |
+
+**量产流程**(在试点阶段全部功能验证通过后执行):
+
 ```bash
 cd project
-# ① 生成签名密钥 (离线保管, 丢失无法再签名)
+# ① 生成签名密钥 (离线备份; 丢失后无法再发布新固件)
 openssl ecparam -name prime256v1 -genkey -noout -out secure_boot_signing_key.pem
 
-# ② 启用 Secure Boot V2 (开发模式, 验证固件可引导)
+# ② 启用 Flash Encryption (Development) + Secure Boot V2, 构建烧录并验证引导
 idf.py menuconfig   # Security features → Enable hardware Secure Boot → Secure Boot V2
-                    # → 指定签名密钥路径; Flash encryption → Enable (Development mode)
+                    # (指定 ① 的签名密钥路径); Flash encryption → Enable (Development mode)
 idf.py build
-espefuse.py -p /dev/ttyACM1 burn_efuse SECURE_BOOT_EN      # 开发模式(未锁)
-idf.py -p /dev/ttyACM1 flash monitor                       # 验证引导
+idf.py -p /dev/ttyACM1 flash monitor    # 验证引导正常 + 全用例对拍
 
-# ③ 量产锁定 (确认所有固件已签名、密钥已 eFuse 后, 不可逆!)
-espefuse.py -p /dev/ttyACM1 burn_efuse SECURE_BOOT_AGGRESSIVE_REVOKE   # 防降级
-espefuse.py -p /dev/ttyACM1 burn_efuse FLASH_CRYPT_CNT   # Flash Encryption 转 Release
-espefuse.py -p /dev/ttyACM1 burn_efuse DIS_DOWNLOAD_MODE # 可选: 禁下载模式
+# ③ Flash Encryption 转 Release: 此后 esptool 自动加密烧写 (不可逆)
+espefuse.py -p /dev/ttyACM1 burn_efuse FLASH_CRYPT_CNT
+idf.py -p /dev/ttyACM1 flash            # 验证加密通道烧录正常
+
+# ④ Secure Boot 使能: 此后只引导签名固件 (不可逆)
+espefuse.py -p /dev/ttyACM1 burn_efuse SECURE_BOOT_EN
+idf.py -p /dev/ttyACM1 flash            # 验证签名固件引导正常
+
+# ⑤ 可选: 防旧固件回滚 (需确认签名密钥与加密密钥已妥善备份, 不可逆)
+espefuse.py -p /dev/ttyACM1 burn_efuse SECURE_BOOT_AGGRESSIVE_REVOKE
+# 注意: 不烧 DIS_DOWNLOAD_MODE, 保留返修串口烧录通道 (物理防护替代)
 ```
 
-> 锁定后未签名固件无法引导、加密 flash 无法离线读、密钥不可读——
-> 先完成全部功能验证与产测流程,再执行 ③。
+**锁定后的固件更新**(产线/售后路径):
+
+- 日常更新: `idf.py flash` 流程不变 —— 构建时自动签名 (SB), esptool 自动加密写 (FE);
+- 售后返修: 下载模式保留 → 重烧即可; 若已烧 `DIS_DOWNLOAD_MODE` → 只能 OTA;
+- 密钥管理: SB 签名密钥离线备份 (丢失=无法发布新固件); FE 密钥在片内不可读;
+  角色密钥轮换见 §7.2⑤。
 
 ### 7.4 产线注入顺序清单
 
