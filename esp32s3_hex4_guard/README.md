@@ -198,8 +198,8 @@ static int role_key_from_efuse(esp_efuse_block_t block, uint8_t key[32]) {
 
 - eFuse 是一次性可编程 (OTP): 烧过的 bit 不能再改回;
 - 锁定后**固件仍可反复烧录**, 但必须满足: Secure Boot 签名 + Flash Encryption 加密通道;
-- **只有烧 `DIS_DOWNLOAD_MODE` 才会彻底禁用串口烧录** (售后返修不建议烧该项,
-  物理接口防护替代; 若烧了, 固件更新只能走 OTA)。
+- **全阶段策略: 不烧 `DIS_DOWNLOAD_MODE`** —— 保证硬件任何时候都可重新烧录,
+  下载接口防护由物理手段承担 (产线治具/外壳封印/接口不引出)。
 
 **分层策略**(按产品阶段渐进, 每阶段可回退):
 
@@ -232,13 +232,13 @@ idf.py -p /dev/ttyACM1 flash            # 验证签名固件引导正常
 
 # ⑤ 可选: 防旧固件回滚 (需确认签名密钥与加密密钥已妥善备份, 不可逆)
 espefuse.py -p /dev/ttyACM1 burn_efuse SECURE_BOOT_AGGRESSIVE_REVOKE
-# 注意: 不烧 DIS_DOWNLOAD_MODE, 保留返修串口烧录通道 (物理防护替代)
+# 注意: 任何阶段都不烧 DIS_DOWNLOAD_MODE (保证硬件可重新烧录)
 ```
 
 **锁定后的固件更新**(产线/售后路径):
 
 - 日常更新: `idf.py flash` 流程不变 —— 构建时自动签名 (SB), esptool 自动加密写 (FE);
-- 售后返修: 下载模式保留 → 重烧即可; 若已烧 `DIS_DOWNLOAD_MODE` → 只能 OTA;
+- 售后返修: 下载模式永久保留 → 任何时候重烧即可 (OTA 仅作可选补充, 非唯一通道);
 - 密钥管理: SB 签名密钥离线备份 (丢失=无法发布新固件); FE 密钥在片内不可读;
   角色密钥轮换见 §7.2⑤。
 
@@ -250,7 +250,8 @@ espefuse.py -p /dev/ttyACM1 burn_efuse SECURE_BOOT_AGGRESSIVE_REVOKE
 ④ 烧 RD_DIS 锁密钥读保护
 ⑤ 烧 Secure Boot 摘要/使能 + 签名 bootloader/app
 ⑥ 验证: 上电自检 PASS → 灯绿 → 上位机按角色签名指令对拍全过
-⑦ 烧写锁定: FLASH_CRYPT_CNT / SECURE_BOOT_AGGRESSIVE_REVOKE / (可选)DIS_DOWNLOAD_MODE
+⑦ 烧写锁定: FLASH_CRYPT_CNT / SECURE_BOOT_AGGRESSIVE_REVOKE (任何阶段均不烧
+   DIS_DOWNLOAD_MODE, 硬件保持可重新烧录)
 ⑧ 终检: 拔线断线红灯、重连恢复、各角色越权/越界全拒
 ```
 
