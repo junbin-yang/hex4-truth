@@ -201,6 +201,18 @@ static int role_key_from_efuse(esp_efuse_block_t block, uint8_t key[32]) {
 - **全阶段策略: 不烧 `DIS_DOWNLOAD_MODE`** —— 保证硬件任何时候都可重新烧录,
   下载接口防护由物理手段承担 (产线治具/外壳封印/接口不引出)。
 
+**放弃 DIS_DOWNLOAD_MODE 后的威胁评估**(下载模式 = 最强物理攻击通道, 四层防护正交):
+
+| 攻击手段 (经串口下载模式) | 无 eFuse 防护的后果 | 对应 eFuse 防线 |
+|---|---|---|
+| `read_flash` 读整个 flash | 固件/明文密钥/业务数据全泄露 | **Flash Encryption** (读出为密文) |
+| `erase_flash` + 烧任意固件 | 恶意固件接管设备 | **Secure Boot V2** (未签名拒绝引导) |
+| 读 eFuse 角色密钥 | 伪造任意角色指令 | **RD_DIS** (密钥不可读) |
+
+> 结论: 不烧 `DIS_DOWNLOAD_MODE` 使攻击者获得稳定的物理攻击入口,
+> **其余 eFuse 安全位从纵深防御变为仅有的电子防线, 三者缺一不可**;
+> 且与"随时重烧"完全兼容 (锁定后 idf.py flash 自动签名+加密, 流程不变)。
+
 **分层策略**(按产品阶段渐进, 每阶段可回退):
 
 | 阶段 | 配置 | 目的 |
