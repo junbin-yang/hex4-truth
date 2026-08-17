@@ -143,12 +143,18 @@ cd components/hex4_guard/host_tests && make test
 
 ### 7.1 威胁模型与目标
 
-| 风险 | 防护 |
-|---|---|
-| 密钥随固件明文泄露(读 flash) | 密钥入 eFuse,烧写后锁 RD_DIS 不可读 |
-| 固件被替换/篡改 | Secure Boot V2(只引导签名固件) |
-| flash 数据被离线读取 | Flash Encryption |
-| 物理拆片读 eFuse | 超出威胁模型(见文档 §6.6) |
+| 风险 | 防护 | 状态 |
+|---|---|---|
+| 密钥随固件明文泄露(读 flash) | 密钥入 eFuse,烧写后锁 RD_DIS 不可读 | ✅ 必选 |
+| flash 固件/数据被离线读取 | Flash Encryption(读出为密文) | ✅ 量产启用 |
+| 整个固件被重写/替换(固件植入) | — | ❌ **排除出威胁模型**(见下) |
+| 物理拆片读 eFuse | — | ❌ 超出威胁模型(见文档 §6.6) |
+
+**威胁模型边界**: 攻击者物理接入串口下载模式并整体重写固件(固件替换)
+**不纳入本设备的安全考虑范围** —— 该路径与"攻击者直接换一块自己做的板子"
+等效,由部署环境的物理防护承担。因此 **Secure Boot V2 不启用**:
+其唯一防护对象(未签名固件引导)已排除。核心资产(指令授权)由角色密钥
+eFuse + RD_DIS 保护,该防护在恶意固件运行时依然有效(硬件级不可读)。
 
 ### 7.2 角色密钥注入 eFuse
 
@@ -192,79 +198,67 @@ static int role_key_from_efuse(esp_efuse_block_t block, uint8_t key[32]) {
 **⑤ 密钥轮换**: 帧头版本字节兼作密钥版本;过渡期上位机持新旧两把密钥,
 设备按版本字节择钥(BLOCK_KEY0/1 双槽);或简化为重烧。烧断的槽不可复用。
 
-### 7.3 Secure Boot V2 + Flash Encryption(固件保护)
+### 7.3 Flash Encryption(固件/数据读取防护)
 
 **"不可逆"指 eFuse 安全位, 不是烧录能力**:
 
 - eFuse 是一次性可编程 (OTP): 烧过的 bit 不能再改回;
-- 锁定后**固件仍可反复烧录**, 但必须满足: Secure Boot 签名 + Flash Encryption 加密通道;
+- 锁定后**固件仍可反复烧录**, 但必须经 Flash Encryption 加密通道 (esptool 自动处理);
 - **全阶段策略: 不烧 `DIS_DOWNLOAD_MODE`** —— 保证硬件任何时候都可重新烧录,
   下载接口防护由物理手段承担 (产线治具/外壳封印/接口不引出)。
 
-**放弃 DIS_DOWNLOAD_MODE 后的威胁评估**(下载模式 = 最强物理攻击通道, 四层防护正交):
+**放弃 DIS_DOWNLOAD_MODE 后的威胁评估**(下载模式 = 最强物理攻击通道, 防护正交):
 
 | 攻击手段 (经串口下载模式) | 无 eFuse 防护的后果 | 对应 eFuse 防线 |
 |---|---|---|
-| `read_flash` 读整个 flash | 固件/明文密钥/业务数据全泄露 | **Flash Encryption** (读出为密文) |
-| `erase_flash` + 烧任意固件 | 恶意固件接管设备 | **Secure Boot V2** (未签名拒绝引导) |
+| `read_flash` 读整个 flash | 固件/数据/明文密钥全泄露 | **Flash Encryption** (读出为密文) |
 | 读 eFuse 角色密钥 | 伪造任意角色指令 | **RD_DIS** (密钥不可读) |
+| `erase_flash` + 烧任意固件 | 恶意固件接管设备 | 排除出威胁模型 (物理防护承担) |
 
 > 结论: 不烧 `DIS_DOWNLOAD_MODE` 使攻击者获得稳定的物理攻击入口,
-> **其余 eFuse 安全位从纵深防御变为仅有的电子防线, 三者缺一不可**;
-> 且与"随时重烧"完全兼容 (锁定后 idf.py flash 自动签名+加密, 流程不变)。
+> **Flash Encryption 与 RD_DIS 是仅有的电子防线, 两者缺一不可**;
+> 且与"随时重烧"完全兼容 (锁定后 idf.py flash 自动走加密通道, 流程不变)。
 
 **分层策略**(按产品阶段渐进, 每阶段可回退):
 
 | 阶段 | 配置 | 目的 |
 |---|---|---|
 | 开发调试 | 全部关闭 (当前 demo 状态) | 快速迭代 |
-| 试点/小批量 | 仅角色密钥 eFuse + RD_DIS (§7.2) | 认证强化, 保留烧录自由 |
-| 量产 | + Flash Encryption Release + Secure Boot V2 | 固件保护 |
+| 试点/小批量 | 角色密钥 eFuse + RD_DIS (§7.2) | 认证强化 (核心资产) |
+| 量产 | + Flash Encryption Release | 固件/数据读取防护 |
 
 **量产流程**(在试点阶段全部功能验证通过后执行):
 
 ```bash
 cd project
-# ① 生成签名密钥 (离线备份; 丢失后无法再发布新固件)
-openssl ecparam -name prime256v1 -genkey -noout -out secure_boot_signing_key.pem
-
-# ② 启用 Flash Encryption (Development) + Secure Boot V2, 构建烧录并验证引导
-idf.py menuconfig   # Security features → Enable hardware Secure Boot → Secure Boot V2
-                    # (指定 ① 的签名密钥路径); Flash encryption → Enable (Development mode)
+# ① 启用 Flash Encryption (Development), 构建烧录并验证引导
+idf.py menuconfig   # Security features → Flash encryption → Enable (Development mode)
 idf.py build
 idf.py -p /dev/ttyACM1 flash monitor    # 验证引导正常 + 全用例对拍
 
-# ③ Flash Encryption 转 Release: 此后 esptool 自动加密烧写 (不可逆)
+# ② Flash Encryption 转 Release: 此后 esptool 自动加密烧写 (不可逆)
 espefuse.py -p /dev/ttyACM1 burn_efuse FLASH_CRYPT_CNT
 idf.py -p /dev/ttyACM1 flash            # 验证加密通道烧录正常
-
-# ④ Secure Boot 使能: 此后只引导签名固件 (不可逆)
-espefuse.py -p /dev/ttyACM1 burn_efuse SECURE_BOOT_EN
-idf.py -p /dev/ttyACM1 flash            # 验证签名固件引导正常
-
-# ⑤ 可选: 防旧固件回滚 (需确认签名密钥与加密密钥已妥善备份, 不可逆)
-espefuse.py -p /dev/ttyACM1 burn_efuse SECURE_BOOT_AGGRESSIVE_REVOKE
-# 注意: 任何阶段都不烧 DIS_DOWNLOAD_MODE (保证硬件可重新烧录)
+# 注意: 任何阶段都不烧 DIS_DOWNLOAD_MODE (保证硬件可重新烧录);
+#       Secure Boot 不启用 (固件替换攻击排除出威胁模型, 见 §7.1)
 ```
 
 **锁定后的固件更新**(产线/售后路径):
 
-- 日常更新: `idf.py flash` 流程不变 —— 构建时自动签名 (SB), esptool 自动加密写 (FE);
+- 日常更新: `idf.py flash` 流程不变 —— esptool 自动加密写 (FE);
 - 售后返修: 下载模式永久保留 → 任何时候重烧即可 (OTA 仅作可选补充, 非唯一通道);
-- 密钥管理: SB 签名密钥离线备份 (丢失=无法发布新固件); FE 密钥在片内不可读;
-  角色密钥轮换见 §7.2⑤。
+- 密钥管理: FE 密钥在片内不可读; 角色密钥轮换见 §7.2⑤。
 
 ### 7.4 产线注入顺序清单
 
 ```
-① 烧写固件 (开发模式: 明文) 或 ② 先使能加密再烧加密固件
-③ 烧写角色密钥 BLOCK_KEY0..2 (KEY_PURPOSE=USER)
-④ 烧 RD_DIS 锁密钥读保护
-⑤ 烧 Secure Boot 摘要/使能 + 签名 bootloader/app
-⑥ 验证: 上电自检 PASS → 灯绿 → 上位机按角色签名指令对拍全过
-⑦ 烧写锁定: FLASH_CRYPT_CNT / SECURE_BOOT_AGGRESSIVE_REVOKE (任何阶段均不烧
-   DIS_DOWNLOAD_MODE, 硬件保持可重新烧录)
-⑧ 终检: 拔线断线红灯、重连恢复、各角色越权/越界全拒
+① 烧写固件 (开发模式: 明文)
+② 烧写角色密钥 BLOCK_KEY0..2 (KEY_PURPOSE=USER)
+③ 烧 RD_DIS 锁密钥读保护
+④ 使能 Flash Encryption → 烧 FLASH_CRYPT_CNT 转 Release → 验证加密烧录
+⑤ 验证: 上电自检 PASS → 灯绿 → 上位机按角色签名指令对拍全过
+⑥ 终检: 拔线断线红灯、重连恢复、各角色越权/越界全拒
+   (任何阶段均不烧 DIS_DOWNLOAD_MODE, 硬件保持可重新烧录)
 ```
 
 ## 8. 开发状态
