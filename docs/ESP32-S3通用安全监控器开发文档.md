@@ -48,9 +48,9 @@
 ## 3. 指令生命周期(同步模型,执行/拒绝在回执之前)
 
 ```
-启动 → ULP 自检 272 项
-  ├─ FAIL → 门控断开 + 拒绝一切执行 (DENY/SELFTEST) + 红闪 + 仅响应 ping
-  └─ PASS → 进入 WATCH, 允许执行
+启动 → ULP 自检 272 项 (自检期间 selftest=PENDING, ping 可应答并回显状态)
+  ├─ FAIL → 门控断开 + 拒绝一切执行 (DENY/SELFTEST) + 红闪 + 仅响应 ping (selftest=FAIL)
+  └─ PASS → 进入 WATCH, 允许执行 (selftest=PASS, 上位机就绪信号)
 UART 帧到达
   ├─ 失步/CRC 失败      → 丢弃残帧重同步, 不回执
   ├─ 重放 (seq ≤ 已见, 命中缓存)   → 回上次回执 (幂等重放)
@@ -147,11 +147,13 @@ HMAC-SHA256 使用 ESP32-S3 SHA 硬件加速 (mbedTLS), µs 级
   "deny_layer": "NONE" | "INTEGRITY" | "REPLAY" | "ENCODING" | "L3" | "L4" | "SELFTEST",
   "tc_source": "NONE" | "INTEGRITY" | "SENSOR_FAULT" | "ENCODING",
   "exec_ok": true | false,      // ALLOW 时的硬件执行结果
-  "state": { "sensor": "T1" }   // 判定时刻的传感器三态快照 (审计, V1 单通道)
+  "state": { "sensor": "T1" },  // 判定时刻的传感器三态快照 (审计, V1 单通道)
+  "selftest": "PENDING" | "PASS" | "FAIL"   // ULP 自检状态 (设备就绪信号)
 }
 ```
 
 - `ABORTED` = 判定已通过、动作已执行,但执行中被 L4 紧急终止(物理已发生但未完成)——与 `DENY`(从未执行)语义区分。
+- **`selftest` 是设备就绪信号**:上电/复位后为 `PENDING`(自检进行中),自检完成转为 `PASS` 或 `FAIL`;上位机**应等待 `selftest=PASS` 再下发执行类指令**(PENDING/FAIL 时执行类指令一律 DENY/SELFTEST,ping 在任意阶段可应答并携带当前自检状态)。
 - `tc_source` 枚举与 §6.5 红闪三来源对齐;V1 传感器失效并入 ULP TC 告警,映射为 `SENSOR_FAULT`(失效检测细化列入 V2)。
 - 回执帧与指令帧共用 §6.1 封装(含 CRC);回执不回签(点到点 UART,威胁小)。
 
@@ -273,7 +275,8 @@ esp_err_t hex4_guard_report_abort(const char *reason);     /* 内部: ULP 越界
 ④ 配置角色密钥         → 每角色生成 256-bit 密钥, 注入 eFuse/加密 NVS (见 §6.6)
 ⑤ (必选量产) 安全启动  → Secure Boot V2 + Flash Encryption
 ⑥ (可选) 门控 GPIO     → 外接执行器使能端/继电器 (外部默认安全电平)
-上位机侧              → 按 §6.1 帧协议发指令 (每 1s 发 ping 保活), 按 §6.2 解析回执
+上位机侧              → 按 §6.1 帧协议发指令 (每 1s 发 ping 保活), 按 §6.2 解析回执;
+                         启动后轮询 ping 直至回执 selftest=PASS 再下发执行类指令
 ```
 
 **场景示例**：

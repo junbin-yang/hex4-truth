@@ -61,6 +61,12 @@ typedef enum {
     GUARD_TC_ENCODING,          /* 非法编码 */
 } guard_tc_source_t;
 
+typedef enum {
+    GUARD_SELFTEST_PENDING = 0, /* ULP 自检进行中 (尚未出结果) */
+    GUARD_SELFTEST_PASS,        /* 自检通过, 允许执行 */
+    GUARD_SELFTEST_FAIL,        /* 自检失败, 封锁执行 (仅 ping 可应答) */
+} guard_selftest_state_t;
+
 const char *guard_verdict_name(guard_verdict_t v);
 const char *guard_deny_layer_name(guard_deny_layer_t d);
 const char *guard_tc_source_name(guard_tc_source_t t);

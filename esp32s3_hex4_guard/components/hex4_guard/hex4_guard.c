@@ -42,7 +42,7 @@ static guard_replay_t   s_replay;
 static hex4_guard_stats_t s_stats;
 static QueueHandle_t    s_frame_queue;
 static volatile int     s_abort_pending;    /* 执行中被 L4/断线中止标志 */
-static bool             s_selftest_pass;    /* ULP 自检门控 (初始封锁) */
+static guard_selftest_state_t s_selftest = GUARD_SELFTEST_PENDING; /* 自检门控 (初始未出结果) */
 static bool             s_abort_latched;    /* 断线红灯锁存 (新帧解除) */
 static int64_t          s_frame_arrived_us; /* 帧进入判定时间 (diag_us 起点) */
 
@@ -75,6 +75,7 @@ static void reply_and_commit(uint32_t seq, guard_verdict_t verdict,
         .diag_us = (int32_t)(esp_timer_get_time() - s_frame_arrived_us),
         .led_state = led_state_name(),
         .latched = s_abort_latched ? 1 : 0,
+        .selftest = (int)s_selftest,
     };
     uint8_t json[GUARD_FRAME_MAX_PAYLOAD + 1];
     uint16_t jlen = guard_reply_build(&r, json, sizeof(json));
@@ -144,8 +145,8 @@ static void handle_cmd_frame(const uint8_t *payload, uint16_t len) {
         return;
     }
 
-    /* 自检门控 : ULP 自检未通过 → 拒绝一切执行 (ping 除外, 供状态查询) */
-    if (!s_selftest_pass && strcmp(j_action->valuestring, "ping") != 0) {
+    /* 自检门控 : 自检未 PASS (PENDING/FAIL) → 拒绝一切执行 (ping 除外, 供状态查询) */
+    if (s_selftest != GUARD_SELFTEST_PASS && strcmp(j_action->valuestring, "ping") != 0) {
         cJSON_Delete(root);
         s_stats.total++; s_stats.deny++; s_stats.deny_selftest++;
         reply_and_commit(seq, GUARD_VERDICT_DENY, GUARD_DENY_SELFTEST, GUARD_TC_NONE,
@@ -366,7 +367,7 @@ esp_err_t hex4_guard_report_abort(const char *reason) {
 }
 
 void hex4_guard_set_selftest(bool pass) {
-    s_selftest_pass = pass;
+    s_selftest = pass ? GUARD_SELFTEST_PASS : GUARD_SELFTEST_FAIL;
 }
 
 bool hex4_guard_abort_latched(void) {

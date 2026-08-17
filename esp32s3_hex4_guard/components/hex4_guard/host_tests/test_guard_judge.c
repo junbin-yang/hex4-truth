@@ -250,6 +250,20 @@ static void test_reply(void) {
     check_cond("无 state 时无 state 字段", cJSON_GetObjectItem(j, "state") == NULL);
     cJSON_Delete(j);
 
+    /* 自检状态字段 (上位机据此判断设备就绪) */
+    guard_reply_t st = {
+        .seq = 45, .verdict = GUARD_VERDICT_ALLOW, .deny_layer = GUARD_DENY_NONE,
+        .tc_source = GUARD_TC_NONE, .exec_ok = 1, .sensor_state = NULL,
+        .diag_us = -1, .led_state = NULL, .latched = -1,
+        .selftest = GUARD_SELFTEST_PASS,
+    };
+    len = guard_reply_build(&st, buf, sizeof(buf));
+    check_cond("selftest 回执构造成功", len > 0);
+    j = cJSON_Parse((const char *)buf);
+    check_cond("selftest=PASS 字段",
+               strcmp(cJSON_GetObjectItem(j, "selftest")->valuestring, "PASS") == 0);
+    cJSON_Delete(j);
+
     /* NULL 防御 */
     check_eq_u("NULL 返回 0", 0u,
                (unsigned long)guard_reply_build(NULL, buf, sizeof(buf)));

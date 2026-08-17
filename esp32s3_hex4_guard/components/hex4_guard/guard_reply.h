@@ -38,6 +38,7 @@ typedef struct {
     int32_t diag_us;                    /* 设备侧判定耗时 µs (-1=不输出) */
     const char *led_state;              /* 诊断: 回执时刻灯态 (NULL=不输出) */
     int latched;                        /* 诊断: 断线锁存状态 (-1=不输出) */
+    int selftest;                       /* 自检状态 PENDING/PASS/FAIL (-1=不输出) */
 } guard_reply_t;
 
 /**

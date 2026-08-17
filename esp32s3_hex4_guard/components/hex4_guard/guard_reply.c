@@ -49,6 +49,11 @@ uint16_t guard_reply_build(const guard_reply_t *r, uint8_t *out, size_t out_cap)
     if (r->latched >= 0) {
         cJSON_AddBoolToObject(root, "latched", r->latched != 0);
     }
+    if (r->selftest >= 0) {
+        static const char *st_names[] = { "PENDING", "PASS", "FAIL" };
+        cJSON_AddStringToObject(root, "selftest",
+            (r->selftest <= GUARD_SELFTEST_FAIL) ? st_names[r->selftest] : "??");
+    }
 
     char *txt = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
