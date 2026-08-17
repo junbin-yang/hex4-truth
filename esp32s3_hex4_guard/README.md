@@ -34,7 +34,7 @@ esp32s3_hex4_guard/
 ├── tools/
 │   ├── guard_cmd.py             指令对拍脚本(角色密钥签名)
 │   ├── guard_keepalive.py       保活循环(断线测试, 自动重连)
-│   └── guard_ping.py            echo 对拍(历史)
+│   └── guard_ping.py            快速对拍(兼容现行协议)
 └── README.md                    本文档
 ```
 
