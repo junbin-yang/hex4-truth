@@ -83,6 +83,74 @@ python3 ../tools/guard_keepalive.py /dev/ttyACM1   # 每秒保活
 # 拔 USB-UART 线 → 5s 后红灯锁存; 插回 → 下一拍恢复绿灯 (脚本自动重连)
 ```
 
+### 2.4 模拟案例: 电机速度联锁(完整演示)
+
+**案例设定**: 上位机(Python 脚本)扮演控制台, "电机"由 demo 回调模拟;
+GPIO1 用杜邦线模拟"限位传感器"(3V3=触发/GND=正常)。
+
+#### 物理接线(开发调试形态)
+
+```
+PC ──USB-UART 线──► 板载 USB-UART 口    (指令链路 + 烧录)
+PC ──USB 线──────► 板载直连 USB 口     (日志 console)
+GPIO1 (排针 J2) ──杜邦线──► 3V3 / GND   (模拟传感器电平, 可悬空)
+板载 WS2812 灯 = 六态门控指示 (目视观察)
+```
+
+#### 两条并行链路的运行逻辑(核心概念)
+
+```
+┌─ 指令链路 (事件驱动, 主 CPU) ──────────────┐
+│ 上位机发帧 → 判定链 → 执行/拒绝 → 回执      │
+│   串口忙/空闲与否, 不影响下方链路            │
+└────────────────┬──────────────────────────┘
+                 │ 两处汇合: ①执行前查 L4 包络
+                 │          ②执行中被越界中止(ABORTED)
+┌────────────────▼──────────────────────────┐
+│ 传感器值守链路 (固定 10ms 循环, ULP 协处理器)│
+│ ADC 采样 → 三态化(T0/T1/T2/TC) → 灯态      │
+│  → 越界/TC 事件 → 紧急停止 + 红灯           │
+│   主 CPU 忙时照常值守, 0 抖动, 互不阻塞      │
+└────────────────────────────────────────────┘
+```
+
+| 维度 | 指令链路(串口) | 传感器值守(ULP) |
+|---|---|---|
+| 执行者 | 主 CPU(判定链) | ULP-RISC-V 协处理器 |
+| 输入 | 上位机指令帧(JSON+HMAC) | ADC1_CH0(GPIO1)电平 |
+| 节奏 | 事件驱动(来一帧处理一帧,~0.9ms) | 固定 10ms 循环(0 抖动) |
+| 输出 | 回执(ALLOW/DENY/ABORTED) | 灯态 + 事件 + 紧急停止 |
+| 关系 | **执行前**查传感器包络(T2/TC 拒绝执行);**执行中**被越界事件中止 | 独立值守, 不依赖串口 |
+
+#### 演示会话(照做即可)
+
+```bash
+# 终端 1: 保活循环 (观察回执摘要, 含 led/latched/selftest 字段)
+python3 ../tools/guard_keepalive.py /dev/ttyACM1
+
+# 终端 2: 指令对拍 (GPIO1 先接 GND)
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator speed=50
+#  → ALLOW + exec_ok=true (绿灯; 日志打印 MOTOR RUN speed=50)
+
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator speed=101
+#  → DENY/L3 (参数越界, 红灯一闪) ← 指令链路自身判定
+
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run supervisor speed=50
+#  → DENY/L3 (越权)
+
+# 现在把 GPIO1 杜邦线改接 3V3 (模拟限位触发), 灯变红:
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator speed=50
+#  → DENY/L4 (传感器包络越界, 不执行) ← 两条链路在"执行前检查"处汇合
+python3 ../tools/guard_cmd.py /dev/ttyACM1 ping operator
+#  → 仍 ALLOW (查询不受 L4 门控), 回执 state=T2
+
+# 杜邦线接回 GND → 灯恢复绿 → 指令恢复可执行
+```
+
+**要点**: 串口指令负责"动作是否被允许", ULP 负责"环境是否安全"——
+前者由上位机触发、判定表决定; 后者恒在后台循环、由物理量决定;
+两者在**执行前**与**执行中**两个时刻汇合, 保证任何一条链路异常都不放行动作。
+
 ## 3. 使用方集成
 
 1. **定义动作集与权限表** — 编辑 `components/hex4_guard/guard_permissions.c`:
