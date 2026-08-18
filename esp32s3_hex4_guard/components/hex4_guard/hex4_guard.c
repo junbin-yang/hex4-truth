@@ -23,6 +23,8 @@
 #include "hex4_guard.h"
 #include "guard_reply.h"
 #include "guard_policy.h"
+#include "guard_state.h"
+#include "guard_state_gen.h"
 #include "guard_cmd.h"
 #include "guard_led.h"
 
@@ -45,6 +47,8 @@ static volatile int     s_abort_pending;    /* 执行中被 L4/断线中止标�
 static guard_selftest_state_t s_selftest = GUARD_SELFTEST_PENDING; /* 自检门控 (初始未出结果) */
 static bool             s_abort_latched;    /* 断线红灯锁存 (新帧解除) */
 static int64_t          s_frame_arrived_us; /* 帧进入判定时间 (diag_us 起点) */
+static portMUX_TYPE     s_state_lock = portMUX_INITIALIZER_UNLOCKED; /* 状态机并发保护
+                                     (指令事件=guard 任务, abort 注入=事件任务) */
 
 /*================ 传感器快照 (接 ULP mailbox) ================*/
 
@@ -69,6 +73,11 @@ static void reply_and_commit(uint32_t seq, guard_verdict_t verdict,
                              guard_deny_layer_t layer, guard_tc_source_t tc,
                              int exec_ok, const char *sensor_state,
                              const uint8_t *payload, uint16_t payload_len) {
+    /* 状态快照锁内取指针 (字符串表恒定, 指针在锁外安全使用) */
+    const char *sm_now;
+    portENTER_CRITICAL(&s_state_lock);
+    sm_now = guard_state_name();
+    portEXIT_CRITICAL(&s_state_lock);
     guard_reply_t r = {
         .seq = seq, .verdict = verdict, .deny_layer = layer, .tc_source = tc,
         .exec_ok = exec_ok, .sensor_state = sensor_state,
@@ -76,6 +85,7 @@ static void reply_and_commit(uint32_t seq, guard_verdict_t verdict,
         .led_state = led_state_name(),
         .latched = s_abort_latched ? 1 : 0,
         .selftest = (int)s_selftest,
+        .sm_state = sm_now,
     };
     uint8_t json[GUARD_FRAME_MAX_PAYLOAD + 1];
     uint16_t jlen = guard_reply_build(&r, json, sizeof(json));
@@ -154,7 +164,96 @@ static void handle_cmd_frame(const uint8_t *payload, uint16_t len) {
         return;
     }
 
-    /* ③ 动作查表 (未知动作 = L3 拒绝) */
+    /* ③ 状态机事件指令 (先于动作查表): 事件名命中 → 注入状态机
+     * 事件指令与动作指令同路径验签; 参数化事件参数参与签名 */
+    const guard_state_event_def_t *evdef = guard_state_event_find(j_action->valuestring);
+    if (evdef) {
+        int ev_param_count = 0;
+        for (const cJSON *it = j_params->child; it; it = it->next) {
+            ev_param_count++;
+        }
+        guard_param_kv_t evparams[1];
+        uint8_t ev_count = 0;
+        uint16_t evparam = 0xFFFF;
+        if (evdef->param_name) {
+            const cJSON *pv = cJSON_GetObjectItem(j_params, evdef->param_name);
+            /* 参数域校验: 整数且 ≤65535, 防 double 截断回绕命中转移
+             * (如 65538 → 2 触发 COLLAB; 2.5 → 2) */
+            int ev_param_bad = !pv || !cJSON_IsNumber(pv) || ev_param_count != 1;
+            if (!ev_param_bad) {
+                double evd = pv->valuedouble;
+                ev_param_bad = (evd < 0.0 || evd > 65535.0 ||
+                                evd != (double)(uint32_t)evd);
+            }
+            if (ev_param_bad) {
+                cJSON_Delete(root);
+                s_stats.total++; s_stats.deny++; s_stats.deny_encoding++;
+                reply_and_commit(seq, GUARD_VERDICT_DENY, GUARD_DENY_ENCODING,
+                           GUARD_TC_ENCODING, -1, sensor_state_now(), payload, len);
+                return;
+            }
+            evparam = (uint16_t)pv->valuedouble;
+            evparams[0].param_id = evdef->param_id;
+            evparams[0].value = evparam;
+            ev_count = 1;
+        } else if (ev_param_count != 0) {
+            cJSON_Delete(root);
+            s_stats.total++; s_stats.deny++; s_stats.deny_encoding++;
+            reply_and_commit(seq, GUARD_VERDICT_DENY, GUARD_DENY_ENCODING,
+                       GUARD_TC_ENCODING, -1, sensor_state_now(), payload, len);
+            return;
+        }
+        guard_cmd_canonical_t evcanon = {
+            .seq = seq, .action_id = 0, .role_id = 0,
+            .params = ev_count ? evparams : NULL, .param_count = ev_count,
+        };
+        int ev_role = guard_verify_authenticate(s_cfg.role_keys, s_cfg.role_count,
+                                                &evcanon, j_hmac->valuestring,
+                                                s_cfg.hmac_fn);
+        if (ev_role < 0) {
+            cJSON_Delete(root);
+            s_stats.total++; s_stats.deny++;
+            if (ev_role == -2) { s_stats.deny_encoding++; }
+            else { s_stats.deny_integrity++; }
+            reply_and_commit(seq, GUARD_VERDICT_DENY,
+                       ev_role == -2 ? GUARD_DENY_ENCODING : GUARD_DENY_INTEGRITY,
+                       ev_role == -2 ? GUARD_TC_ENCODING : GUARD_TC_INTEGRITY,
+                       -1, sensor_state_now(), payload, len);
+            return;
+        }
+        if (j_role) {
+            const guard_role_key_t *rk = guard_role_by_id((uint8_t)ev_role);
+            if (!rk || strcmp(rk->name, j_role->valuestring) != 0) {
+                cJSON_Delete(root);
+                s_stats.total++; s_stats.deny++; s_stats.deny_integrity++;
+                reply_and_commit(seq, GUARD_VERDICT_DENY, GUARD_DENY_INTEGRITY,
+                           GUARD_TC_INTEGRITY, -1, sensor_state_now(), payload, len);
+                return;
+            }
+        }
+        /* 注入 (临界区: 与 abort 注入并发) */
+        guard_state_result_t sr;
+        portENTER_CRITICAL(&s_state_lock);
+        sr = guard_state_event(evdef->event, evparam);
+        portEXIT_CRITICAL(&s_state_lock);
+        if (sr == GUARD_STATE_NO_TRANS) {
+            cJSON_Delete(root);
+            s_stats.total++; s_stats.deny++; s_stats.deny_l3++;
+            reply_and_commit(seq, GUARD_VERDICT_DENY, GUARD_DENY_L3, GUARD_TC_NONE,
+                       -1, sensor_state_now(), payload, len);
+            ESP_LOGW(TAG, "sm event no-trans: event=%s param=%u state=%s",
+                     evdef->name, evparam, guard_state_name());
+            return;
+        }
+        cJSON_Delete(root);
+        s_stats.total++; s_stats.allow++;
+        ESP_LOGI(TAG, "sm event: %s -> %s", evdef->name, guard_state_name());
+        reply_and_commit(seq, GUARD_VERDICT_ALLOW, GUARD_DENY_NONE, GUARD_TC_NONE,
+                         1, sensor_state_now(), payload, len);
+        return;
+    }
+
+    /* ④ 动作查表 (未知动作 = L3 拒绝) */
     const guard_action_cfg_t *action = guard_action_find(j_action->valuestring);
     if (!action) {
         cJSON_Delete(root);
@@ -164,17 +263,19 @@ static void handle_cmd_frame(const uint8_t *payload, uint16_t len) {
         return;
     }
 
-    /* ④ 参数按动作表声明顺序映射 (未知/多余参数 = ENCODING 拒绝) */
+    /* ⑤ 参数按动作表声明顺序映射 (未知/多余参数 = ENCODING 拒绝) */
     guard_param_kv_t params[GUARD_PARAM_MAX];
     int param_bad = 0;
     for (uint8_t i = 0; i < action->param_count; i++) {
         const cJSON *v = cJSON_GetObjectItem(j_params, action->params[i].name);
-        if (!v || !cJSON_IsNumber(v)) {
+        /* 整数性校验 (与事件路径对称): 拒绝小数/负数/超域, 防截断回绕绕过 L3 */
+        double vd = (v && cJSON_IsNumber(v)) ? v->valuedouble : -1.0;
+        if (vd < 0.0 || vd > 4294967295.0 || vd != (double)(uint32_t)vd) {
             param_bad = 1;
             break;
         }
         params[i].param_id = action->params[i].param_id;
-        params[i].value = (uint32_t)v->valuedouble;
+        params[i].value = (uint32_t)vd;
     }
     /* 严格: JSON 参数个数必须与定义一致 (防御多余参数注入) */
     int json_param_count = 0;
@@ -192,7 +293,7 @@ static void handle_cmd_frame(const uint8_t *payload, uint16_t len) {
         return;
     }
 
-    /* ⑤ 角色验签: 身份由密钥确定 */
+    /* ⑥ 角色验签: 身份由密钥确定 */
     guard_cmd_canonical_t canon = {
         .seq = seq, .action_id = action->action_id, .role_id = 0,
         .params = params, .param_count = action->param_count,
@@ -227,7 +328,24 @@ static void handle_cmd_frame(const uint8_t *payload, uint16_t len) {
         }
     }
 
-    /* ⑥ L3 权限 + 参数域判定 (不执行) */
+    /* ⑥½ 状态机前置条件 (L3 前, 状态 deny 位图; 与 abort 注入并发保护) */
+    {
+        int sm_ok;
+        portENTER_CRITICAL(&s_state_lock);
+        sm_ok = guard_state_allows(action->action_id);
+        portEXIT_CRITICAL(&s_state_lock);
+        if (!sm_ok) {
+            cJSON_Delete(root);
+            s_stats.total++; s_stats.deny++; s_stats.deny_sm++;
+            reply_and_commit(seq, GUARD_VERDICT_DENY, GUARD_DENY_L3, GUARD_TC_NONE,
+                       -1, sensor_state_now(), payload, len);
+            ESP_LOGW(TAG, "sm deny: action=%s state=%s",
+                     action->name, guard_state_name());
+            return;
+        }
+    }
+
+    /* ⑦ L3 权限 + 参数域判定 (不执行) */
     guard_action_cmd_t acmd = {
         .action_id = action->action_id,
         .params = params, .param_count = action->param_count,
@@ -256,7 +374,7 @@ static void handle_cmd_frame(const uint8_t *payload, uint16_t len) {
         return;
     }
 
-    /* ⑦ 执行 (同步, 回执前; ping 无回调) */
+    /* ⑧ 执行 (同步, 回执前; ping 无回调) */
     int exec_ok = 1;
     s_abort_pending = 0;
     if (action->fn) {
@@ -265,7 +383,7 @@ static void handle_cmd_frame(const uint8_t *payload, uint16_t len) {
                  exec_ok ? "OK" : "FAIL");
     }
 
-    /* ⑧ 回执 (执行中被 L4/断线中止 → 单条 ABORTED; 否则 ALLOW) */
+    /* ⑨ 回执 (执行中被 L4/断线中止 → 单条 ABORTED; 否则 ALLOW) */
     cJSON_Delete(root);
     if (s_abort_pending) {
         s_stats.total++; s_stats.aborted++;
@@ -309,6 +427,7 @@ esp_err_t hex4_guard_init(const hex4_guard_cfg_t *cfg) {
     s_cfg = *cfg;
     guard_replay_init(&s_replay, (uint8_t)cfg->seq_cache_depth);
     memset(&s_stats, 0, sizeof(s_stats));
+    guard_state_init();                 /* 状态机初始态 (IDLE, deny 位图生效) */
     if (cfg->led_gpio >= 0) {
         esp_err_t led_err = guard_led_init((gpio_num_t)cfg->led_gpio);
         if (led_err != ESP_OK) {
@@ -359,6 +478,13 @@ esp_err_t hex4_guard_report_abort(const char *reason) {
      * 立即调用 abort_fn 物理终止 (与执行回调并发, 使用方保证线程安全)。 */
     ESP_LOGE(TAG, "ABORT: %s", reason ? reason : "unknown");
     s_abort_pending = 1;
+    /* 状态机转入锁存态 (E-STOP): 直到 operator_ack 事件才允许重启 */
+    portENTER_CRITICAL(&s_state_lock);
+    guard_state_result_t smr = guard_state_event(GUARD_EV_estop_release, 0xFFFF);
+    portEXIT_CRITICAL(&s_state_lock);
+    if (smr != GUARD_STATE_OK) {
+        ESP_LOGW(TAG, "abort sm inject no-trans (约束包缺 estop_release 转移?)");
+    }
     if (s_cfg.abort_fn) {
         s_cfg.abort_fn();
     }

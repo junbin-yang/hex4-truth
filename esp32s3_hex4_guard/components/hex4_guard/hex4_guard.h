@@ -72,6 +72,7 @@ typedef struct {
     uint32_t deny_l3;
     uint32_t deny_l4;
     uint32_t deny_selftest;
+    uint32_t deny_sm;                   /* N1.3: 状态机前置条件否决 (L3 前) */
 } hex4_guard_stats_t;
 
 esp_err_t hex4_guard_init(const hex4_guard_cfg_t *cfg);

@@ -33,10 +33,15 @@ uint16_t guard_reply_build(const guard_reply_t *r, uint8_t *out, size_t out_cap)
     if (r->exec_ok >= 0) {
         cJSON_AddBoolToObject(root, "exec_ok", r->exec_ok != 0);
     }
-    if (r->sensor_state) {
+    if (r->sensor_state || r->sm_state) {
         cJSON *state = cJSON_CreateObject();
         if (state) {
-            cJSON_AddStringToObject(state, "sensor", r->sensor_state);
+            if (r->sensor_state) {
+                cJSON_AddStringToObject(state, "sensor", r->sensor_state);
+            }
+            if (r->sm_state) {
+                cJSON_AddStringToObject(state, "sm", r->sm_state);
+            }
             cJSON_AddItemToObject(root, "state", state);
         }
     }

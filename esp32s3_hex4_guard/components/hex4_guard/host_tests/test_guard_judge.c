@@ -24,6 +24,7 @@
 #include "guard_verify.h"
 #include "guard_policy.h"
 #include "guard_reply.h"
+#include "guard_constraints_gen.h"
 
 static int pass = 0, fail = 0;
 
@@ -84,14 +85,27 @@ static void test_lookup(void) {
 
 /*================ 2. L3 权限 + 参数域判定 ================*/
 
+/* motor_run 场景 A 参数集构造 (顺序 = 动作表声明序 = 验签 canon 序) */
+static void mk_run(guard_action_cmd_t *c, guard_param_kv_t p[5],
+                   uint32_t speed, uint32_t payload, uint32_t door,
+                   uint32_t force, uint32_t mode) {
+    p[0].param_id = 1; p[0].value = speed;
+    p[1].param_id = 2; p[1].value = payload;
+    p[2].param_id = 4; p[2].value = door;
+    p[3].param_id = 3; p[3].value = force;
+    p[4].param_id = 5; p[4].value = mode;
+    c->action_id = 1; c->params = p; c->param_count = 5;
+}
+
 static void test_policy(void) {
     printf("[TEST-L3 判定]\n");
     const guard_action_cfg_t *run = guard_action_find("motor_run");
     const guard_action_cfg_t *stop = guard_action_find("motor_stop");
     const guard_action_cfg_t *ping = guard_action_find("ping");
 
-    guard_param_kv_t p_speed = { 1, 50 };
-    guard_action_cmd_t run_cmd = { 1, &p_speed, 1 };
+    guard_param_kv_t p[5];
+    guard_action_cmd_t run_cmd;
+    mk_run(&run_cmd, p, 100, 1000, 0, 10000, 0);    /* 合法基线 (0.1m/s, 1kg) */
     guard_action_cmd_t no_cmd = { 2, NULL, 0 };
 
     /* 权限: motor_run 允许 operator(0)/maintenance(1), 拒绝 supervisor(2) */
@@ -108,34 +122,56 @@ static void test_policy(void) {
     check_eq_u("ping 任意角色通过", GUARD_POLICY_OK,
                guard_policy_check(ping, 2, &no_cmd));
 
-    /* 参数域: speed ∈ [0,100] */
-    uint32_t vals[] = { 0, 50, 100, 101, 0xFFFFFFFFu };
-    unsigned long exps[] = { GUARD_POLICY_OK, GUARD_POLICY_OK, GUARD_POLICY_OK,
-                             GUARD_POLICY_DENY_PARAM, GUARD_POLICY_DENY_PARAM };
-    for (int i = 0; i < 5; i++) {
-        guard_param_kv_t p = { 1, vals[i] };
-        guard_action_cmd_t c = { 1, &p, 1 };
-        char name[48];
-        snprintf(name, sizeof(name), "motor_run speed=%lu", (unsigned long)vals[i]);
-        check_eq_u(name, exps[i], guard_policy_check(run, 1, &c));
-    }
+    /* 参数域: RANGE_LUT 能量限 (payload=1kg 档上界 141 = 0.141m/s) */
+    mk_run(&run_cmd, p, 141, 1000, 0, 10000, 0);
+    check_eq_u("能量限 1kg v=141 过", GUARD_POLICY_OK,
+               guard_policy_check(run, 1, &run_cmd));
+    mk_run(&run_cmd, p, 142, 1000, 0, 10000, 0);
+    check_eq_u("能量限 1kg v=142 拒", GUARD_POLICY_DENY_PARAM,
+               guard_policy_check(run, 1, &run_cmd));
+    /* payload 非法档位 (3000=3kg 不在档位表) → fail-safe */
+    mk_run(&run_cmd, p, 100, 3000, 0, 10000, 0);
+    check_eq_u("payload 非法档位拒", GUARD_POLICY_DENY_PARAM,
+               guard_policy_check(run, 1, &run_cmd));
+    /* door 非法枚举 */
+    mk_run(&run_cmd, p, 100, 1000, 9, 10000, 0);
+    check_eq_u("door=9 拒", GUARD_POLICY_DENY_PARAM,
+               guard_policy_check(run, 1, &run_cmd));
+    /* 动作门控: door=1 → DENY_ACTION (when→deny 位图 0x6) */
+    mk_run(&run_cmd, p, 100, 1000, 1, 10000, 0);
+    check_eq_u("门控 door=1 拒", GUARD_POLICY_DENY_ACTION,
+               guard_policy_check(run, 1, &run_cmd));
+    /* COND: mode=2(collab) force 收紧 ≤120000 */
+    mk_run(&run_cmd, p, 100, 1000, 0, 120000, 2);
+    check_eq_u("COND mode=2 force=120000 过", GUARD_POLICY_OK,
+               guard_policy_check(run, 1, &run_cmd));
+    mk_run(&run_cmd, p, 100, 1000, 0, 120001, 2);
+    check_eq_u("COND mode=2 force=120001 拒", GUARD_POLICY_DENY_PARAM,
+               guard_policy_check(run, 1, &run_cmd));
+    /* COND 不设限: mode=0 时收紧不适用 */
+    mk_run(&run_cmd, p, 100, 1000, 0, 500000, 0);
+    check_eq_u("COND mode=0 不设限", GUARD_POLICY_OK,
+               guard_policy_check(run, 1, &run_cmd));
 
     /* 参数数量不符 */
-    guard_action_cmd_t extra = { 1, &p_speed, 0 };  /* 缺参 */
+    guard_action_cmd_t extra = { 1, p, 4 };   /* 缺参 */
     check_eq_u("motor_run 缺参", GUARD_POLICY_BAD_COUNT,
                guard_policy_check(run, 1, &extra));
-    guard_param_kv_t two[2] = { { 1, 10 }, { 2, 20 } };
-    guard_action_cmd_t over = { 1, two, 2 };        /* 多参 */
+    guard_param_kv_t six[6];
+    guard_action_cmd_t over = { 1, six, 6 };  /* 多参 */
     check_eq_u("motor_run 多参", GUARD_POLICY_BAD_COUNT,
                guard_policy_check(run, 1, &over));
 
     /* 参数 ID 不符 */
-    guard_param_kv_t wrong_id = { 9, 50 };
-    guard_action_cmd_t wid = { 1, &wrong_id, 1 };
+    guard_param_kv_t wid_p[5];
+    guard_action_cmd_t wid;
+    mk_run(&wid, wid_p, 100, 1000, 0, 10000, 0);
+    wid_p[0].param_id = 9;
     check_eq_u("motor_run 参数 ID 错", GUARD_POLICY_BAD_PARAM_ID,
                guard_policy_check(run, 1, &wid));
 
     /* NULL 防御 */
+    mk_run(&run_cmd, p, 100, 1000, 0, 10000, 0);
     check_eq_u("NULL 动作拒", GUARD_POLICY_DENY_PARAM,
                guard_policy_check(NULL, 1, &run_cmd));
 }
@@ -196,6 +232,330 @@ static void test_verify(void) {
                (unsigned long)guard_verify_authenticate(NULL, 0, &canon, hex, fake_hmac));
 }
 
+/*================ 4.5 新形状判定 (RANGE_LUT / COND / 动作门控) ================*/
+
+/* 演示动作 tcp_move(speed, payload): params 引用生成表数据 (N1.2 集成) */
+static const guard_param_def_t shapes_move_params[] = {
+    { .param_id = 1, .name = "tcp_speed", .kind = GUARD_PARAM_RANGE_LUT,
+      .lo = 0, .hi = 5, .lut_bounds = g_gen_lut_tcp_speed, .ref_param_id = 2 },
+    { .param_id = 2, .name = "payload", .kind = GUARD_PARAM_ENUM,
+      .lo = 0, .hi = 5, .enum_vals = g_gen_enum_payload },
+};
+static const guard_action_cfg_t shapes_move = {
+    .action_id = 3, .name = "tcp_move", .perm_mask = 0,
+    .fn = NULL, .params = shapes_move_params, .param_count = 2,
+};
+
+/* 下界表形状 (combine2 op=">=" 封闭方向, 手工 LUT) */
+static const uint32_t lower_bounds[] = { 100u, 200u };
+static const uint32_t lower_gear[] = { 1u, 2u };
+static const guard_param_def_t lower_params[] = {
+    { .param_id = 1, .name = "speed", .kind = GUARD_PARAM_RANGE_LUT,
+      .lo = 1, .hi = 2, .lut_bounds = lower_bounds, .ref_param_id = 2 },
+    { .param_id = 2, .name = "gear", .kind = GUARD_PARAM_ENUM,
+      .lo = 0, .hi = 2, .enum_vals = lower_gear },
+};
+static const guard_action_cfg_t lower_move = {
+    .action_id = 4, .name = "lower_move", .perm_mask = 0,
+    .fn = NULL, .params = lower_params, .param_count = 2,
+};
+
+/* 条件收紧动作 (mode=2 collab → force ≤ 120000), 引用生成表 */
+static const guard_param_def_t cond_params[] = {
+    { .param_id = 3, .name = "tcp_force", .kind = GUARD_PARAM_COND,
+      .lo = 0, .hi = 120000, .enum_vals = g_gen_cond_tcp_force,
+      .when_count = 1, .ref_param_id = 5 },
+    { .param_id = 5, .name = "mode", .kind = GUARD_PARAM_ENUM,
+      .lo = 0, .hi = 3, .enum_vals = g_gen_enum_mode },
+};
+static const guard_action_cfg_t cond_move = {
+    .action_id = 5, .name = "cond_move", .perm_mask = 0,
+    .fn = NULL, .params = cond_params, .param_count = 2,
+};
+
+/* 动作门控演示 (action_id=1 ∈ deny 位图 0x6): safety_door=1 → 拒绝 */
+static const uint32_t door_vals[] = { 0u, 1u };
+static const guard_param_def_t gated_params[] = {
+    { .param_id = 1, .name = "tcp_speed", .kind = GUARD_PARAM_RANGE,
+      .lo = 0, .hi = 250 },    /* 0.25 m/s 上限 (m/s×1000) */
+    { .param_id = 4, .name = "safety_door", .kind = GUARD_PARAM_ENUM,
+      .lo = 0, .hi = 2, .enum_vals = door_vals },
+};
+static const guard_action_cfg_t gated_move = {
+    .action_id = 1, .name = "gated_move", .perm_mask = 0,
+    .fn = NULL, .params = gated_params, .param_count = 2,
+};
+
+/* 单参动作 (不含条件参数): 门控 ref 未参与 → 跳过 */
+static const guard_param_def_t skip_params[] = {
+    { .param_id = 1, .name = "tcp_speed", .kind = GUARD_PARAM_RANGE,
+      .lo = 0, .hi = 250 },
+};
+static const guard_action_cfg_t skip_move = {
+    .action_id = 1, .name = "skip_move", .perm_mask = 0,
+    .fn = NULL, .params = skip_params, .param_count = 1,
+};
+
+static void test_shapes(void) {
+    printf("[TEST-新形状判定]\n");
+
+    /* RANGE_LUT 能量限 (½·m·v² ≤ 10mJ 演示取值, v 单位 m/s 定点 ×1000,
+     * 逐档边界由 z3 离线求解):
+     * m=0→250(退化=RANGE 上限) 1→141 2→100 5→63 10→44 */
+    static const struct { uint32_t m, ok_v, bad_v; } lut_cases[] = {
+        { 0,     250, 251 },
+        { 1000,  141, 142 },
+        { 2000,  100, 101 },
+        { 5000,  63,  64 },
+        { 10000, 44,  45 },
+    };
+    for (int i = 0; i < 5; i++) {
+        guard_param_kv_t p[2] = { { 1, lut_cases[i].ok_v }, { 2, lut_cases[i].m } };
+        guard_action_cmd_t c = { 3, p, 2 };
+        char name[56];
+        snprintf(name, sizeof(name), "能量限 m=%lu v=%lu 过",
+                 (unsigned long)lut_cases[i].m, (unsigned long)lut_cases[i].ok_v);
+        check_eq_u(name, GUARD_POLICY_OK, guard_policy_check(&shapes_move, 0, &c));
+        p[0].value = lut_cases[i].bad_v;
+        snprintf(name, sizeof(name), "能量限 m=%lu v=%lu 拒",
+                 (unsigned long)lut_cases[i].m, (unsigned long)lut_cases[i].bad_v);
+        check_eq_u(name, GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&shapes_move, 0, &c));
+    }
+
+    /* 参考值非法档位 (payload=3kg 不在 bucket 表) → fail-safe 拒绝 */
+    {
+        guard_param_kv_t p[2] = { { 1, 10 }, { 2, 3000 } };
+        guard_action_cmd_t c = { 3, p, 2 };
+        check_eq_u("LUT 参考值非法档位拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&shapes_move, 0, &c));
+    }
+
+    /* 配置缺失 (动作表无 ref def) → fail-safe 拒绝 */
+    {
+        static const guard_param_def_t no_ref_params[] = {
+            { .param_id = 1, .name = "tcp_speed", .kind = GUARD_PARAM_RANGE_LUT,
+              .lo = 0, .hi = 5, .lut_bounds = g_gen_lut_tcp_speed, .ref_param_id = 2 },
+        };
+        static const guard_action_cfg_t no_ref_move = {
+            .action_id = 6, .name = "no_ref_move", .perm_mask = 0,
+            .fn = NULL, .params = no_ref_params, .param_count = 1,
+        };
+        guard_param_kv_t p = { 1, 100 };
+        guard_action_cmd_t c = { 6, &p, 1 };
+        check_eq_u("LUT 缺 ref def 拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&no_ref_move, 0, &c));
+    }
+
+    /* lut_bounds NULL → fail-safe 拒绝 */
+    {
+        static const guard_param_def_t null_lut_params[] = {
+            { .param_id = 1, .name = "tcp_speed", .kind = GUARD_PARAM_RANGE_LUT,
+              .lo = 0, .hi = 5, .lut_bounds = NULL, .ref_param_id = 2 },
+            { .param_id = 2, .name = "payload", .kind = GUARD_PARAM_ENUM,
+              .lo = 0, .hi = 5, .enum_vals = g_gen_enum_payload },
+        };
+        static const guard_action_cfg_t null_lut_move = {
+            .action_id = 7, .name = "null_lut_move", .perm_mask = 0,
+            .fn = NULL, .params = null_lut_params, .param_count = 2,
+        };
+        guard_param_kv_t p[2] = { { 1, 100 }, { 2, 1000 } };
+        guard_action_cmd_t c = { 7, p, 2 };
+        check_eq_u("LUT 表 NULL 拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&null_lut_move, 0, &c));
+    }
+
+    /* 参考定义非 ENUM → fail-safe 拒绝 */
+    {
+        static const guard_param_def_t badref_lut_params[] = {
+            { .param_id = 1, .name = "tcp_speed", .kind = GUARD_PARAM_RANGE_LUT,
+              .lo = 0, .hi = 5, .lut_bounds = g_gen_lut_tcp_speed, .ref_param_id = 2 },
+            { .param_id = 2, .name = "payload", .kind = GUARD_PARAM_RANGE,
+              .lo = 0, .hi = 10000 },
+        };
+        static const guard_action_cfg_t badref_lut_move = {
+            .action_id = 12, .name = "badref_lut_move", .perm_mask = 0,
+            .fn = NULL, .params = badref_lut_params, .param_count = 2,
+        };
+        guard_param_kv_t p[2] = { { 1, 100 }, { 2, 1000 } };
+        guard_action_cmd_t c = { 12, p, 2 };
+        check_eq_u("LUT 参考定义非 ENUM 拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&badref_lut_move, 0, &c));
+    }
+
+    /* 参考 ENUM 的 enum_vals NULL → fail-safe 拒绝 */
+    {
+        static const guard_param_def_t nullref_lut_params[] = {
+            { .param_id = 1, .name = "tcp_speed", .kind = GUARD_PARAM_RANGE_LUT,
+              .lo = 0, .hi = 5, .lut_bounds = g_gen_lut_tcp_speed, .ref_param_id = 2 },
+            { .param_id = 2, .name = "payload", .kind = GUARD_PARAM_ENUM,
+              .lo = 0, .hi = 5, .enum_vals = NULL },
+        };
+        static const guard_action_cfg_t nullref_lut_move = {
+            .action_id = 13, .name = "nullref_lut_move", .perm_mask = 0,
+            .fn = NULL, .params = nullref_lut_params, .param_count = 2,
+        };
+        guard_param_kv_t p[2] = { { 1, 100 }, { 2, 1000 } };
+        guard_action_cmd_t c = { 13, p, 2 };
+        check_eq_u("LUT 参考表 NULL 拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&nullref_lut_move, 0, &c));
+    }
+
+    /* 下界表 (lo=1): gear 档位 → v >= bound */
+    {
+        static const struct { uint32_t g, ok_v, bad_v; } lower_cases[] = {
+            { 1, 100, 99 },
+            { 2, 200, 199 },
+        };
+        for (int i = 0; i < 2; i++) {
+            guard_param_kv_t p[2] = { { 1, lower_cases[i].ok_v },
+                                      { 2, lower_cases[i].g } };
+            guard_action_cmd_t c = { 4, p, 2 };
+            char name[56];
+            snprintf(name, sizeof(name), "下界表 gear=%lu v=%lu 过",
+                     (unsigned long)lower_cases[i].g,
+                     (unsigned long)lower_cases[i].ok_v);
+            check_eq_u(name, GUARD_POLICY_OK, guard_policy_check(&lower_move, 0, &c));
+            p[0].value = lower_cases[i].bad_v;
+            snprintf(name, sizeof(name), "下界表 gear=%lu v=%lu 拒",
+                     (unsigned long)lower_cases[i].g,
+                     (unsigned long)lower_cases[i].bad_v);
+            check_eq_u(name, GUARD_POLICY_DENY_PARAM,
+                       guard_policy_check(&lower_move, 0, &c));
+        }
+    }
+
+    /* COND 协作模式力收紧: mode=2 → force ∈ [0,120000]; 其他模式不设限 */
+    {
+        guard_param_kv_t p[2] = { { 3, 120000 }, { 5, 2 } };
+        guard_action_cmd_t c = { 5, p, 2 };
+        check_eq_u("COND mode=2 force=120000 过", GUARD_POLICY_OK,
+                   guard_policy_check(&cond_move, 0, &c));
+        p[0].value = 120001;
+        check_eq_u("COND mode=2 force=120001 拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&cond_move, 0, &c));
+        p[0].value = 500000;
+        p[1].value = 0;
+        check_eq_u("COND mode=0 不设限", GUARD_POLICY_OK,
+                   guard_policy_check(&cond_move, 0, &c));
+        p[1].value = 1;
+        check_eq_u("COND mode=1 不设限", GUARD_POLICY_OK,
+                   guard_policy_check(&cond_move, 0, &c));
+    }
+
+    /* COND 表损坏 fail-safe: enum_vals NULL / when_count=0 / 超上限 */
+    {
+        static const guard_param_def_t null_cond_params[] = {
+            { .param_id = 3, .name = "tcp_force", .kind = GUARD_PARAM_COND,
+              .lo = 0, .hi = 120000, .enum_vals = NULL,
+              .when_count = 1, .ref_param_id = 5 },
+            { .param_id = 5, .name = "mode", .kind = GUARD_PARAM_ENUM,
+              .lo = 0, .hi = 3, .enum_vals = g_gen_enum_mode },
+        };
+        static const guard_action_cfg_t null_cond_move = {
+            .action_id = 8, .name = "null_cond_move", .perm_mask = 0,
+            .fn = NULL, .params = null_cond_params, .param_count = 2,
+        };
+        guard_param_kv_t p[2] = { { 3, 100 }, { 5, 2 } };
+        guard_action_cmd_t c = { 8, p, 2 };
+        check_eq_u("COND 集合 NULL 拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&null_cond_move, 0, &c));
+
+        static const uint32_t over_when[] = { 0u };
+        static const guard_param_def_t over_params[] = {
+            { .param_id = 3, .name = "tcp_force", .kind = GUARD_PARAM_COND,
+              .lo = 0, .hi = 120000, .enum_vals = over_when,
+              .when_count = 16, .ref_param_id = 5 },
+            { .param_id = 5, .name = "mode", .kind = GUARD_PARAM_ENUM,
+              .lo = 0, .hi = 3, .enum_vals = g_gen_enum_mode },
+        };
+        static const guard_action_cfg_t over_move = {
+            .action_id = 9, .name = "over_move", .perm_mask = 0,
+            .fn = NULL, .params = over_params, .param_count = 2,
+        };
+        check_eq_u("COND when_count 超限拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&over_move, 0, &c));
+
+        static const guard_param_def_t zero_params[] = {
+            { .param_id = 3, .name = "tcp_force", .kind = GUARD_PARAM_COND,
+              .lo = 0, .hi = 120000, .enum_vals = over_when,
+              .when_count = 0, .ref_param_id = 5 },
+            { .param_id = 5, .name = "mode", .kind = GUARD_PARAM_ENUM,
+              .lo = 0, .hi = 3, .enum_vals = g_gen_enum_mode },
+        };
+        static const guard_action_cfg_t zero_move = {
+            .action_id = 10, .name = "zero_move", .perm_mask = 0,
+            .fn = NULL, .params = zero_params, .param_count = 2,
+        };
+        check_eq_u("COND when_count=0 拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&zero_move, 0, &c));
+
+        /* 参考定义存在但非 ENUM (kind=RANGE) → 配置损坏 fail-safe */
+        static const guard_param_def_t badref_params[] = {
+            { .param_id = 3, .name = "tcp_force", .kind = GUARD_PARAM_COND,
+              .lo = 0, .hi = 120000, .enum_vals = g_gen_cond_tcp_force,
+              .when_count = 1, .ref_param_id = 5 },
+            { .param_id = 5, .name = "mode", .kind = GUARD_PARAM_RANGE,
+              .lo = 0, .hi = 3 },
+        };
+        static const guard_action_cfg_t badref_move = {
+            .action_id = 11, .name = "badref_move", .perm_mask = 0,
+            .fn = NULL, .params = badref_params, .param_count = 2,
+        };
+        check_eq_u("COND 参考定义非 ENUM 拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&badref_move, 0, &c));
+
+        /* 参考定义缺失 (动作表漏挂 ref 参数, 帧也不含 ref) → 配置损坏拒绝
+         * (fail-safe 优先于"未参与不设限") */
+        static const guard_param_def_t noref_cond_params[] = {
+            { .param_id = 3, .name = "tcp_force", .kind = GUARD_PARAM_COND,
+              .lo = 0, .hi = 120000, .enum_vals = g_gen_cond_tcp_force,
+              .when_count = 1, .ref_param_id = 5 },
+            { .param_id = 6, .name = "other", .kind = GUARD_PARAM_RANGE,
+              .lo = 0, .hi = 10 },
+        };
+        static const guard_action_cfg_t noref_cond_move = {
+            .action_id = 14, .name = "noref_cond_move", .perm_mask = 0,
+            .fn = NULL, .params = noref_cond_params, .param_count = 2,
+        };
+        guard_param_kv_t np[2] = { { 3, 100 }, { 6, 5 } };
+        guard_action_cmd_t nc = { 14, np, 2 };
+        check_eq_u("COND ref def 缺失拒", GUARD_POLICY_DENY_PARAM,
+                   guard_policy_check(&noref_cond_move, 0, &nc));
+    }
+
+    /* 动作门控 (when→deny): safety_door=1 → 位图 0x6 拒绝动作 1 */
+    {
+        guard_param_kv_t p[2] = { { 1, 123 }, { 4, 0 } };
+        guard_action_cmd_t c = { 1, p, 2 };
+        check_eq_u("门控 door=0 放行", GUARD_POLICY_OK,
+                   guard_policy_check(&gated_move, 0, &c));
+        p[1].value = 1;
+        check_eq_u("门控 door=1 拒绝动作", GUARD_POLICY_DENY_ACTION,
+                   guard_policy_check(&gated_move, 0, &c));
+    }
+
+    /* 门控位图域外 ID (action_id=64) → when 命中即拒绝 */
+    {
+        static const guard_action_cfg_t bigid_move = {
+            .action_id = 64, .name = "bigid_move", .perm_mask = 0,
+            .fn = NULL, .params = gated_params, .param_count = 2,
+        };
+        guard_param_kv_t p[2] = { { 1, 123 }, { 4, 1 } };
+        guard_action_cmd_t c = { 64, p, 2 };
+        check_eq_u("门控 action_id≥64 拒", GUARD_POLICY_DENY_ACTION,
+                   guard_policy_check(&bigid_move, 0, &c));
+    }
+
+    /* 门控不适用: 条件参数未参与指令 → 跳过 (动作 1 照常判定) */
+    {
+        guard_param_kv_t p = { 1, 123 };
+        guard_action_cmd_t c = { 1, &p, 1 };
+        check_eq_u("门控 ref 未参与跳过", GUARD_POLICY_OK,
+                   guard_policy_check(&skip_move, 0, &c));
+    }
+}
+
 /*================ 4. 回执 JSON 构造 ================*/
 
 static void test_reply(void) {
@@ -205,6 +565,7 @@ static void test_reply(void) {
     guard_reply_t deny = {
         .seq = 42, .verdict = GUARD_VERDICT_DENY, .deny_layer = GUARD_DENY_L3,
         .tc_source = GUARD_TC_NONE, .exec_ok = -1, .sensor_state = "T1",
+        .sm_state = "ESTOP_LATCH",
     };
     uint16_t len = guard_reply_build(&deny, buf, sizeof(buf));
     check_cond("DENY 回执构造成功", len > 0);
@@ -218,6 +579,9 @@ static void test_reply(void) {
     check_cond("state.sensor=T1",
                strcmp(cJSON_GetObjectItem(cJSON_GetObjectItem(j, "state"), "sensor")->valuestring,
                       "T1") == 0);
+    check_cond("state.sm=ESTOP_LATCH (N1.3)",
+               strcmp(cJSON_GetObjectItem(cJSON_GetObjectItem(j, "state"), "sm")->valuestring,
+                      "ESTOP_LATCH") == 0);
     check_cond("DENY 无 exec_ok 字段", cJSON_GetObjectItem(j, "exec_ok") == NULL);
     cJSON_Delete(j);
 
@@ -275,6 +639,7 @@ int main(void) {
     printf("========== hex4_guard 判定链单元测试 ==========\n");
     test_lookup();
     test_policy();
+    test_shapes();
     test_verify();
     test_reply();
     printf("===============================================\n");

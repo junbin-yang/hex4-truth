@@ -48,8 +48,14 @@ static const char *TAG = "guard-demo";
 /*================ 使用方回调 (文档 §6.3) ================*/
 
 int action_motor_run(const guard_action_cmd_t *cmd) {
-    ESP_LOGI(TAG, "MOTOR RUN speed=%lu (模拟 300ms 执行窗口)",
-             (unsigned long)cmd->params[0].value);
+    /* 场景 A 参数集 (动作表声明序): speed/payload/door/force/mode */
+    ESP_LOGI(TAG, "MOTOR RUN speed=%lu payload=%lu door=%lu force=%lu mode=%lu "
+             "(模拟 300ms 执行窗口)",
+             (unsigned long)cmd->params[0].value,
+             (unsigned long)cmd->params[1].value,
+             (unsigned long)cmd->params[2].value,
+             (unsigned long)cmd->params[3].value,
+             (unsigned long)cmd->params[4].value);
     vTaskDelay(pdMS_TO_TICKS(300));             /* 模拟执行时长, 供 ABORTED 验证 */
     return 0;                                   /* 0 = 执行成功 */
 }

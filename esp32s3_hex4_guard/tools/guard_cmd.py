@@ -2,11 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 hex4_guard 上位机指令脚本 (角色密钥 HMAC 签名 + 全用例对拍)
-用法: python3 guard_cmd.py <串口> <动作> [角色] [参数]
+用法: python3 guard_cmd.py <串口> <动作> [角色] [参数k=v ...]
 示例:
   python3 guard_cmd.py /dev/ttyACM1 ping
-  python3 guard_cmd.py /dev/ttyACM1 motor_run operator speed=50
-  python3 guard_cmd.py /dev/ttyACM1 motor_run supervisor speed=50   # 期望 DENY/L3
+  python3 guard_cmd.py /dev/ttyACM1 motor_run operator \
+      tcp_speed=100 payload=1000 safety_door=0 tcp_force=10000 mode=0   # ALLOW
+  python3 guard_cmd.py /dev/ttyACM1 motor_run operator \
+      tcp_speed=142 payload=1000 safety_door=0 tcp_force=10000 mode=0   # DENY/L3 能量限
+  python3 guard_cmd.py /dev/ttyACM1 motor_run supervisor ...            # DENY/L3 越权
+参数键入顺序无关 (canon 按固件动作表声明序编码); 缺参/未知参数报错。
 帧格式与 guard_frame.c 一致; HMAC 规范字节串与 guard_cmd.c 一致。
 """
 import sys
@@ -26,11 +30,16 @@ ROLES = {
     "maintenance": {"id": 1, "key": bytes([0x02]) + bytes(31)},
     "supervisor":  {"id": 2, "key": bytes([0x03]) + bytes(31)},
 }
-# 与固件动作表一致
+# 与固件动作表一致; 事件指令 (N1.3) canon action_id=0, 参数化事件参数参与签名
+# 参数顺序须与固件动作表声明序一致 (验签 canon 序)
 ACTIONS = {
-    "motor_run":  {"id": 1, "params": {"speed": 1}},
+    "motor_run": {"id": 1, "params": {"tcp_speed": 1, "payload": 2,
+                                      "safety_door": 4, "tcp_force": 3,
+                                      "mode": 5}},
     "motor_stop": {"id": 2, "params": {}},
     "ping":       {"id": 0, "params": {}},
+    "operator_ack": {"id": 0, "params": {}},
+    "mode_switch":  {"id": 0, "params": {"mode": 5}},
 }
 
 
@@ -51,10 +60,18 @@ def pack(type_: int, payload: bytes) -> bytes:
 
 
 def canonical(seq: int, action_id: int, role_id: int, params, param_ids) -> bytes:
-    """HMAC 规范字节串: seq(4B LE)‖action_id(2B LE)‖role_id(1B)‖(param_id,value)*"""
+    """HMAC 规范字节串: seq(4B LE)‖action_id(2B LE)‖role_id(1B)‖(param_id,value)*
+    参数按 param_ids (ACTIONS 声明序 = 固件动作表声明序) 编码, 键入顺序无关;
+    缺参/多余参数直接报错 (错序会导致验签失败, 不能静默)"""
     out = struct.pack("<IHB", seq, action_id, role_id)
-    for name, val in params.items():
-        out += struct.pack("<BI", param_ids[name], val)
+    for name, pid in param_ids.items():
+        if name not in params:
+            raise SystemExit(f"[canonical] 缺少参数: {name} "
+                             f"(顺序与键入无关, 但必须齐全)")
+        out += struct.pack("<BI", pid, params[name])
+    extra = set(params) - set(param_ids)
+    if extra:
+        raise SystemExit(f"[canonical] 未知参数: {sorted(extra)}")
     return out
 
 

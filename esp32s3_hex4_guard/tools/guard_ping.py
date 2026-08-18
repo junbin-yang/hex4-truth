@@ -5,8 +5,10 @@ hex4_guard 快速对拍脚本 (兼容现行协议: 角色密钥 HMAC 签名, 复
 用法: python3 guard_ping.py <串口> [动作] [角色] [参数k=v ...]
 示例:
   python3 guard_ping.py /dev/ttyACM1                               # ping (默认)
-  python3 guard_ping.py /dev/ttyACM1 motor_run operator speed=50   # ALLOW
-  python3 guard_ping.py /dev/ttyACM1 motor_run operator speed=101  # DENY/L3
+  python3 guard_ping.py /dev/ttyACM1 motor_run operator \
+      tcp_speed=100 payload=1000 safety_door=0 tcp_force=10000 mode=0   # ALLOW
+  python3 guard_ping.py /dev/ttyACM1 motor_run operator \
+      tcp_speed=142 payload=1000 safety_door=0 tcp_force=10000 mode=0   # DENY/L3 能量限
 帧格式与 guard_frame.c 一致; HMAC 规范字节串与 guard_cmd.c 一致。
 """
 import sys

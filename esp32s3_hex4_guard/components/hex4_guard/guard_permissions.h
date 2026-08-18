@@ -39,15 +39,29 @@ extern "C" {
 typedef enum {
     GUARD_PARAM_RANGE = 0,      /* 数值区间 [lo, hi] */
     GUARD_PARAM_ENUM,           /* 枚举集合 (enum_vals, 个数 = hi) */
+    GUARD_PARAM_RANGE_LUT,      /* 组合约束降维: 边界按参考参数档位查表 */
+    GUARD_PARAM_COND,           /* 条件约束: when 集合命中时值域收紧 */
 } guard_param_kind_t;
 
 typedef struct {
     uint8_t  param_id;          /* 参数 ID (规范编码用) */
     const char *name;           /* JSON 参数名 */
     guard_param_kind_t kind;
-    uint32_t lo, hi;            /* RANGE: [lo, hi] */
-    const uint32_t *enum_vals;  /* ENUM: 枚举值数组 */
+    uint32_t lo, hi;            /* RANGE: [lo, hi]; COND: 收紧域 [lo, hi];
+                                 * RANGE_LUT: lo=0 上界表 / lo=1 下界表, hi=表长 */
+    const uint32_t *enum_vals;  /* ENUM: 枚举值数组 (个数 = hi);
+                                 * COND: when 值集合 (个数 = when_count) */
+    const uint32_t *lut_bounds; /* RANGE_LUT: 每档边界表 (下标=参考参数档位) */
+    uint8_t  when_count;        /* COND: when 值个数 (1..15, codegen 校验上限) */
+    uint8_t  ref_param_id;      /* RANGE_LUT / COND: 参考参数 ID */
 } guard_param_def_t;
+
+typedef struct {
+    uint8_t  ref_param_id;      /* 条件参数 ID (指令帧携带时门控生效) */
+    uint8_t  when_count;        /* when 值个数 */
+    const uint32_t *when_values;/* when 值集合 */
+    uint64_t deny_actions;      /* 命中时禁止的动作位图 (动作 ID < 64) */
+} guard_action_gate_t;
 
 typedef struct {
     uint16_t action_id;         /* 动作 ID (规范编码用) */

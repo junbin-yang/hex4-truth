@@ -35,6 +35,7 @@ typedef struct {
     guard_tc_source_t tc_source;        /* TC 信任链源头 */
     int exec_ok;                        /* ALLOW 时的硬件执行结果 (-1=未执行) */
     const char *sensor_state;           /* 传感器三态快照串 (V1 单通道, 如 "T0") */
+    const char *sm_state;               /* 状态机状态快照 (NULL=不输出, N1.3) */
     int32_t diag_us;                    /* 设备侧判定耗时 µs (-1=不输出) */
     const char *led_state;              /* 诊断: 回执时刻灯态 (NULL=不输出) */
     int latched;                        /* 诊断: 断线锁存状态 (-1=不输出) */

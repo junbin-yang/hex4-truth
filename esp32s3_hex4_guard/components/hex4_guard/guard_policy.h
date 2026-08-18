@@ -31,6 +31,7 @@ extern "C" {
 typedef enum {
     GUARD_POLICY_OK = 0,        /* 判定通过 */
     GUARD_POLICY_DENY_PERM,     /* 角色越权 (不在 perm_mask 内) */
+    GUARD_POLICY_DENY_ACTION,   /* 动作级门控 (when 条件命中, deny 位图) */
     GUARD_POLICY_DENY_PARAM,    /* 参数值越界 */
     GUARD_POLICY_BAD_PARAM_ID,  /* 参数 ID 不在动作参数定义内 */
     GUARD_POLICY_BAD_COUNT,     /* 参数数量与定义不符 */
