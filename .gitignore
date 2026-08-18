@@ -27,3 +27,7 @@ esp32s3_hex4_guard/components/hex4_guard/host_tests/test_guard_state
 
 # Python cache
 __pycache__/
+
+# smt_compile pytest 临时产物 (每次运行重建)
+esp32s3_hex4_guard/tools/tests/fixtures/bad_*.yaml
+esp32s3_hex4_guard/tools/tests/fixtures/demo_pkg/
