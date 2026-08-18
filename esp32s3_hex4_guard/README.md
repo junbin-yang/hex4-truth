@@ -1,49 +1,64 @@
-# ESP32-S3 通用安全监控器 — 使用说明
+# ESP32-S3 通用安全监控器 — 使用与配置指南
 
-> 设计文档: [`docs/ESP32-S3通用安全监控器开发文档.md`](../docs/ESP32-S3通用安全监控器开发文档.md)(v1.1)
-> 状态: **开发已完成**(2026-08-17 板级实测通过)
+> 设计文档: [`docs/ESP32-S3安全监控器设计文档.md`](../docs/ESP32-S3安全监控器设计文档.md)(v1.0 整合版)
+> 状态: **全部里程碑完成并板级实测**(2026-08);host 测试 220 项 + 工具链 pytest 22 项全绿。
 
-上位机经 UART 下发指令帧,监控器完成确定性判定后**在返回判定回执前**执行或拒绝;
-传感器包络由 ULP-RISC-V 协处理器并行值守(0 抖动),WS2812 六态门控指示。
+上位机经 UART 下发指令帧(CRC + 角色密钥 HMAC)，监控器完成确定性判定后
+**在返回判定回执前**执行或拒绝；传感器包络由 ULP-RISC-V 协处理器并行值守(0 抖动)，
+WS2812 六态门控指示。物理约束(ISO 10218 / ISO/TS 15066 等条款)经 DSL 描述、
+z3 验证(SMT + LTL BMC)、编译为设备端规则表——设备端无求解器、无浮点，纯查表判定。
 
 ```
-上位机 (RK3588/PC/PLC) ──UART 指令帧(CRC+角色密钥HMAC)──► hex4_guard
-   帧→防重放→JSON解析→角色验签→L3权限/参数域→L4传感器包络→执行回调→回执
-   ULP-RISC-V 并行值守传感器(10ms 周期, 0 抖动) ──越界→紧急停止+红灯
+上位机 (RK3588/PC/PLC) ──UART 指令帧──► 帧→防重放→JSON→验签→状态机前置
+            →L3(权限/参数域/门控)→L4(传感器包络)→执行回调→回执
+ULP-RISC-V 并行值守(10ms, 0 抖动) ──越界→紧急停止+红灯+状态机锁存
+约束工具链(离线) yaml→z3 验证→生成规则表/转移表→设备端查表
 ```
 
-## 1. 目录结构
+## 1. 支持功能一览
+
+| 类别 | 功能 |
+|---|---|
+| 指令安全 | 帧 CRC/失步重同步；角色密钥 HMAC-SHA256 验签定身份；防重放滑动窗口 + 重传幂等缓存 |
+| 判定链 | L3 权限位掩码 + 参数形状(RANGE/ENUM/RANGE_LUT/COND) + 动作级门控(when→deny) + 状态机前置；L4 传感器包络(执行前+执行中)；自检失败门控 |
+| 物理约束形式化 | ISO 条款 DSL(range/enum/combine2/when/ltl) → z3 四项验证 + LTL BMC → C 规则表/转移表生成；覆盖率统计(适用条款口径, 目标 ≥90%) |
+| 安全状态机 | 表驱动转移(通配源/参数化事件)；每状态 deny 位图；E-STOP 确认重启闭环(锁存→ack 恢复)；断线/越界自动注入锁存 |
+| 值守与呈现 | ULP-RISC-V 非休眠并行值守(0 抖动)；WS2812 六态灯(绿/黄/红/红闪/橙闪/断线红灯锁存) |
+| 回执审计 | verdict + deny_layer + 传感器快照 + 状态机快照(state.sm) + 判定耗时(diag_us) + 自检状态 |
+| 事件指令 | operator_ack / mode_switch(参数化) 等经同验签路径注入状态机 |
+
+**判定性能**: 设备判定 877~1338µs(JSON+HMAC+全判定层+回执, <2ms 预算余量 ~17×)。
+
+## 2. 目录结构
 
 ```
 esp32s3_hex4_guard/
-├── components/hex4_guard/      通用安全监控器组件
-│   ├── guard_cmd.h/.c          帧常量/verdict 枚举/HMAC 规范编码
-│   ├── guard_frame.h/.c        CRC16/帧打包/增量解析+失步重同步
-│   ├── guard_replay.h/.c       seq 滑动窗口 + 重传幂等缓存(含变种重放指纹)
-│   ├── guard_permissions.h/.c  动作表/权限表/参数域(使用方配置, 固化 flash)
-│   ├── guard_verify.h/.c       角色验签(逐密钥 HMAC 规范编码, 常量时间比较)
-│   ├── guard_policy.h/.c        L3 判定(权限位掩码 + RANGE/ENUM 参数域)
-│   ├── guard_reply.h/.c        回执 JSON 构造(cJSON)
-│   ├── guard_crypto.h/.c        mbedTLS HMAC-SHA256(SHA 硬件加速)
-│   ├── guard_uart.h/.c          UART 适配(收帧/断线检测/残帧超时)
-│   ├── guard_led.h/.c           WS2812 六态灯(手写 RMT 驱动)
-│   ├── hex4_guard.h/.c          编排层(判定链/执行分发/紧急停止/自检门控)
-│   └── host_tests/              141 项 host 单元测试(零依赖)
-├── project/                     IDF 使用用例工程
-│   └── main/hex4_guard_demo_main.c  demo(回调/ULP 事件/灯态轮询/统计)
+├── components/hex4_guard/        通用安全监控器组件
+│   ├── guard_frame/guard_cmd/guard_replay/  帧协议/规范编码/防重放
+│   ├── guard_verify/guard_crypto/           角色验签/HMAC(mbedTLS 硬件加速)
+│   ├── guard_permissions.h/.c               ★使用方配置: 动作表/角色表
+│   ├── guard_policy.h/.c                    L3 判定(权限+形状+动作门控)
+│   ├── guard_state.h/.c                     安全状态机(LTL 落点)
+│   ├── guard_reply/guard_uart/guard_led/    回执/UART 适配/六态灯
+│   ├── hex4_guard.h/.c                      编排层(判定链/执行/紧急停止)
+│   ├── generated/                           生成物(约束规则表+状态机表, 入库)
+│   └── host_tests/                           220 项 host 单元测试
+├── project/                         IDF demo 工程(UD-ESP32-S3, ULP 值守)
 ├── tools/
-│   ├── guard_cmd.py             指令对拍脚本(角色密钥签名)
-│   ├── guard_keepalive.py       保活循环(断线测试, 自动重连)
-│   └── guard_ping.py            快速对拍(兼容现行协议)
-└── README.md                    本文档
+│   ├── iso_constraints/demo_collab.yaml     ★约束包 DSL(条款+状态机)
+│   ├── smt_compile.py / smt_dsl.py / smt_verify.py / smt_codegen.py / smt_report.py
+│   ├── tests/                               工具链 pytest(22 项)
+│   ├── guard_cmd.py / guard_ping.py         指令对拍脚本(角色密钥签名)
+│   └── guard_keepalive.py                   保活循环(断线测试, 自动重连)
+└── README.md                       本文档
 ```
 
-依赖: 复用 [`esp32s3_hex4_ulp/components/hex4_ulp`](../esp32s3_hex4_ulp/components/hex4_ulp/)(不改);
-ESP-IDF ≥ 5.3(实测 5.4); 硬件 YD-ESP32-S3(板载 WS2812@GPIO48)。
+依赖: 复用 [`esp32s3_hex4_ulp/components/hex4_ulp`](../esp32s3_hex4_ulp/components/hex4_ulp/)(ULP 值守, 不改);
+ESP-IDF ≥5.3(实测 5.4); 硬件 YD-ESP32-S3(板载 WS2812@GPIO48, 双 USB-C)。
 
-## 2. 快速上手
+## 3. 快速上手
 
-### 2.1 构建烧录
+### 3.1 构建烧录
 
 ```bash
 cd esp32s3_hex4_guard/project
@@ -52,360 +67,267 @@ idf.py set-target esp32s3
 idf.py -p /dev/ttyACM1 flash       # 经 USB-UART 口 (CH343) 烧录
 ```
 
-**YD-ESP32-S3 两个 USB 口分工**:
+**YD-ESP32-S3 两个 USB 口分工**(设备名随插拔重枚举, 用 `lsusb` 区分):
 
 | 口 | 链路 | 用途 |
 |---|---|---|
-| USB-UART 口 | CH343P → UART0(GPIO43/44) | 烧录 + 指令链路(开发调试) |
-| 直连 USB 口 | USB-Serial-JTAG(GPIO19/20) | 日志 console(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`) |
+| USB-UART 口 | CH343P(1a86) → UART0(GPIO43/44) | 烧录 + 指令链路(开发调试) |
+| 直连 USB 口 | USB-Serial-JTAG(303a, GPIO19/20) | 日志 console(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`) |
 
-部署形态指令链路改排针 UART1(GPIO17/18,TTL 接上位机),见 demo 顶部宏 `GUARD_LINK_UART`。
-注意: 设备名随插拔重枚举, 用 `lsusb` 区分(1a86=CH343, 303a=Espressif); 新枚举节点需
-`sudo chmod a+rw /dev/ttyACM*`(或加入 dialout 组)。
+新枚举节点权限: `sudo chmod a+rw /dev/ttyACM*`(或加入 dialout 组)。
+部署形态指令链路改排针 UART1(GPIO17/18, TTL 接上位机), 见 demo 顶部宏 `GUARD_LINK_UART`。
 
-### 2.2 首次验证(10 秒)
+### 3.2 首次验证(10 秒)
+
+> demo 动作 `motor_run` 为五参数协议(定点: tcp_speed=m/s×1000, payload=kg×1000,
+> tcp_force=N×1000, safety_door/mode=枚举)。参数键入顺序无关(canon 按动作表声明序)。
 
 ```bash
 python3 ../tools/guard_cmd.py /dev/ttyACM1 ping operator
-# 期望: [RX] verdict=ALLOW, state={'sensor': 'T0'}, led='GREEN'
-python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator speed=50   # ALLOW
-python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator speed=101  # DENY/L3
-python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run supervisor speed=50 # DENY/L3 越权
+# 期望: verdict=ALLOW, state={'sensor': 'T0', 'sm': ...}, led='GREEN', selftest='PASS'
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator \
+    tcp_speed=100 payload=1000 safety_door=0 tcp_force=10000 mode=0   # ALLOW
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator \
+    tcp_speed=142 payload=1000 safety_door=0 tcp_force=10000 mode=0   # DENY/L3 能量限
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator \
+    tcp_speed=100 payload=1000 safety_door=1 tcp_force=10000 mode=0   # DENY/L3 门控
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run supervisor \
+    tcp_speed=100 payload=1000 safety_door=0 tcp_force=10000 mode=0   # DENY/L3 越权
 ```
 
-传感器验证(杜邦线法): GPIO1 接 3V3 → T2 红灯 + 指令 DENY/L4;接 GND → T0 绿灯;
-悬空 → 漂移(黄/红/绿随读数)。
-
-### 2.3 断线测试
+### 3.3 保活与断线测试
 
 ```bash
-python3 ../tools/guard_keepalive.py /dev/ttyACM1   # 每秒保活
-# 拔 USB-UART 线 → 5s 后红灯锁存; 插回 → 下一拍恢复绿灯 (脚本自动重连)
+python3 ../tools/guard_keepalive.py /dev/ttyACM1   # 每秒 ping 保活
+# 拔 USB-UART 线 → 5s 后紧急停止 + 红灯锁存 + 状态机 ESTOP_LATCH;
+# 插回 → ping 解除红灯; operator_ack 确认重启恢复 IDLE
 ```
 
-### 2.4 模拟案例: 电机速度联锁(完整演示)
+## 4. 场景举例(低成本优先)
 
-**案例设定**: 上位机(Python 脚本)扮演控制台, "电机"由 demo 回调模拟;
-GPIO1 用杜邦线模拟"限位传感器"(3V3=触发/GND=正常)。
+### 场景 1: 零硬件 — 纯指令链判定演示（成本 ¥0）
 
-#### 物理接线(开发调试形态)
-
-```
-PC ──USB-UART 线──► 板载 USB-UART 口    (指令链路 + 烧录)
-PC ──USB 线──────► 板载直连 USB 口     (日志 console)
-GPIO1 (排针 J2) ──杜邦线──► 3V3 / GND   (模拟传感器电平, 可悬空)
-板载 WS2812 灯 = 六态门控指示 (目视观察)
-```
-
-#### 两条并行链路的运行逻辑(核心概念)
-
-```
-┌─ 指令链路 (事件驱动, 主 CPU) ──────────────┐
-│ 上位机发帧 → 判定链 → 执行/拒绝 → 回执      │
-│   串口忙/空闲与否, 不影响下方链路            │
-└────────────────┬──────────────────────────┘
-                 │ 两处汇合: ①执行前查 L4 包络
-                 │          ②执行中被越界中止(ABORTED)
-┌────────────────▼──────────────────────────┐
-│ 传感器值守链路 (固定 10ms 循环, ULP 协处理器)│
-│ ADC 采样 → 三态化(T0/T1/T2/TC) → 灯态      │
-│  → 越界/TC 事件 → 紧急停止 + 红灯           │
-│   主 CPU 忙时照常值守, 0 抖动, 互不阻塞      │
-└────────────────────────────────────────────┘
-```
-
-| 维度 | 指令链路(串口) | 传感器值守(ULP) |
-|---|---|---|
-| 执行者 | 主 CPU(判定链) | ULP-RISC-V 协处理器 |
-| 输入 | 上位机指令帧(JSON+HMAC) | ADC1_CH0(GPIO1)电平 |
-| 节奏 | 事件驱动(来一帧处理一帧,~0.9ms) | 固定 10ms 循环(0 抖动) |
-| 输出 | 回执(ALLOW/DENY/ABORTED) | 灯态 + 事件 + 紧急停止 |
-| 关系 | **执行前**查传感器包络(T2/TC 拒绝执行);**执行中**被越界事件中止 | 独立值守, 不依赖串口 |
-
-#### 演示会话(照做即可)
+**无任何额外接线**，只用板载 USB-UART 口与板载 WS2812。演示监控器核心能力：
+角色权限、能量限(½·m·v² ≤ 10mJ 演示值)、安全门联锁、协作模式力收紧、
+E-STOP 确认重启状态机。
 
 ```bash
-# 终端 1: 保活循环 (观察回执摘要, 含 led/latched/selftest 字段)
-python3 ../tools/guard_keepalive.py /dev/ttyACM1
-
-# 终端 2: 指令对拍 (GPIO1 先接 GND)
-python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator speed=50
-#  → ALLOW + exec_ok=true (绿灯; 日志打印 MOTOR RUN speed=50)
-
-python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator speed=101
-#  → DENY/L3 (参数越界, 红灯一闪) ← 指令链路自身判定
-
-python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run supervisor speed=50
-#  → DENY/L3 (越权)
-
-# 现在把 GPIO1 杜邦线改接 3V3 (模拟限位触发), 灯变红:
-python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator speed=50
-#  → DENY/L4 (传感器包络越界, 不执行) ← 两条链路在"执行前检查"处汇合
-python3 ../tools/guard_cmd.py /dev/ttyACM1 ping operator
-#  → 仍 ALLOW (查询不受 L4 门控), 回执 state=T2
-
-# 杜邦线接回 GND → 灯恢复绿 → 指令恢复可执行
+python3 ../tools/guard_keepalive.py /dev/ttyACM1            # 终端 1: 保活
+# 终端 2 (每条间隔 <5s, 否则断线窗触发锁存):
+python3 ../tools/guard_cmd.py /dev/ttyACM1 operator_ack supervisor   # E-STOP 重启(启动后锁存态)
+python3 ../tools/guard_cmd.py /dev/ttyACM1 mode_switch operator mode=2          # → COLLAB
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator \
+    tcp_speed=100 payload=1000 safety_door=0 tcp_force=120000 mode=2   # ALLOW (合法协作运动)
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator \
+    tcp_speed=142 payload=1000 safety_door=0 tcp_force=10000 mode=0    # DENY/L3 (能量限)
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator \
+    tcp_speed=100 payload=1000 safety_door=1 tcp_force=10000 mode=0    # DENY/L3 (门开联锁)
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator \
+    tcp_speed=100 payload=1000 safety_door=0 tcp_force=120001 mode=2   # DENY/L3 (协作力收紧)
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run supervisor ...    # DENY/L3 (越权)
 ```
 
-**要点**: 串口指令负责"动作是否被允许", ULP 负责"环境是否安全"——
-前者由上位机触发、判定表决定; 后者恒在后台循环、由物理量决定;
-两者在**执行前**与**执行中**两个时刻汇合, 保证任何一条链路异常都不放行动作。
+停保活等 6s → 断线自动锁存(灯红) → `motor_run` DENY(状态机) → `operator_ack` 恢复。
+**验证目标**: 全部判定层、门控、状态机闭环、判定时延(diag_us)。
 
-### 2.5 场景: 电池值守(无上位机, 纯 ULP 模式)
+### 场景 2: 杜邦线 — GPIO1 模拟限位传感器（成本 ¥0）
 
-**场景设定**: 电池供电节点, 无上位机、无串口指令, 设备仅负责传感器值守与
-灯态指示(如冷链柜温度超限告警)。
+**1 根杜邦线**把 GPIO1(ADC1_CH0, 排针 J2)接 3V3 或 GND，模拟"限位传感器"电平。
+演示 L4 传感器包络与六态灯。
 
-**运行逻辑**: 判定链与 UART 完全不参与; ULP-RISC-V 独立完成
-"ADC 采样 → 三态化 → 阈值告警 → 灯态", 主 CPU 可选择休眠(µW 级)或照常运行。
+```
+GPIO1 ──杜邦线──► 3V3   → T2 红灯 + 执行类指令 DENY/L4 (ping 仍 ALLOW)
+GPIO1 ──杜邦线──► GND   → T0 绿灯 + 指令恢复执行
+GPIO1 悬空             → 漂移 (黄/红/绿随读数, 演示 T1 预警带)
+```
 
-**配置**(demo 顶部宏 + ULP 参数):
+```bash
+python3 ../tools/guard_keepalive.py /dev/ttyACM1    # 保活
+# GPIO1 接 3V3 后:
+python3 ../tools/guard_cmd.py /dev/ttyACM1 motor_run operator \
+    tcp_speed=100 payload=1000 safety_door=0 tcp_force=10000 mode=0   # DENY/L4
+python3 ../tools/guard_cmd.py /dev/ttyACM1 ping operator               # ALLOW (查询不受 L4)
+# 接回 GND → 灯恢复绿
+```
+
+**验证目标**: 指令链路与传感器值守链路在"执行前"汇合；ULP 独立值守(拔掉串口线
+后灯态照常刷新——值守不依赖上位机)。
+
+### 场景 3: 电位器 — ADC 连续量三态演示（成本 ~¥3）
+
+GPIO1 接 **10kΩ 电位器**(两端 3V3/GND, 中间抽头到 GPIO1)，连续旋出
+T0/T1(黄灯迟滞带)/T2(红灯)三态，演示模拟量阈值的确定性三态化。
+
+**验证目标**: T1 预警带边界、T2 越界→紧急停止(执行中越界可触发 ABORTED——
+motor_run 有 300ms 执行窗口，窗口内快速旋电位器到 T2)、恢复 T0 绿灯。
+
+### 场景 4: 继电器/执行器 — 门控 GPIO 驱动（成本 ~¥10）
+
+板载灯之外，把**门控 GPIO 接执行器使能端**(继电器模块/电机驱动 EN 脚)。
+**外部电路必须默认安全电平**：使能端下拉或常闭继电器——复位/死机时硬件自动
+回到断开，安全动作不依赖软件。断线/越界/自检失败 → 门控断开 + 红灯。
+
+**验证目标**: 断线安全停止的物理闭环(拔线 → 执行器立即失能)。
+
+### 场景 5: 电池值守 — 无上位机纯 ULP（成本 ¥0，改造 1 行配置）
+
+无上位机、无串口，仅传感器值守与灯态(如冷链柜温度超限告警)。demo 顶部宏:
 
 ```c
 #define GUARD_LINK_LOST_MS 0        /* 断线检测禁用 (无上位机) */
-/* hex4_ulp_cfg:
-   ulp_cfg.sleep_mode = HEX4_ULP_SLEEP_DEEP;   // 深睡眠值守 (µW 级, USB 断开)
-   // 或保持 HEX4_ULP_SLEEP_NONE (主 CPU 运行, 灯态轮询照常)
-   ulp_cfg.watch_period_us = 100000;           // 100ms 值守, 更低功耗
-   ulp_cfg.heartbeat_period = 600;             // 60s 心跳 (可选) */
+/* hex4_ulp_cfg: sleep_mode = HEX4_ULP_SLEEP_DEEP (µW 级深睡眠值守);
+   watch_period_us = 100000 (100ms, 更低功耗) */
 ```
 
-**接线**: 仅传感器接 ADC1_CH0(GPIO1), 无需任何串口线;
-观察 WS2812 灯态(绿/黄/红/红闪)即可。此场景完整复用
-[`hex4_ulp`](../esp32s3_hex4_ulp/components/hex4_ulp/README.md) 组件的休眠值守能力
-(深睡眠 + ULP 唤醒), 与本监控器的判定链解耦。
-
-### 2.6 场景: 部署形态接 RK3588
-
-**场景设定**: RK3588 作为上位机, 经排针 UART1(TTL)下发指令并接收回执;
-监控器部署在工业联锁场景(阀门/传送带等)。
-
-**物理接线**(UART1 @ GPIO17/18, 排针 J1):
+### 场景 6: 部署形态 — RK3588/PLC 经排针 UART1（成本 ¥0，需上位机）
 
 ```
-RK3588 UART (TTL 3.3V)             YD-ESP32-S3 排针 J1
-    TXD ─────────────────────────► GPIO18 (UART1 RX)
-    RXD ◄───────────────────────── GPIO17 (UART1 TX)
-    GND ────────────────────────── GND (必须共地)
+RK3588 UART(TTL 3.3V)          YD-ESP32-S3 排针 J1
+    TXD ───────────────────► GPIO18 (UART1 RX)
+    RXD ◄─────────────────── GPIO17 (UART1 TX)
+    GND ──────────────────── GND (必须共地)
 ```
 
-**设备侧配置**(demo 顶部宏, 一行切换):
+设备侧一行切换 `GUARD_LINK_UART=UART_NUM_1`(TX17/RX18) + `GUARD_LINK_LOST_MS=5000`(必开)；
+上位机复用 `guard_keepalive.py`/`guard_cmd.py` 换串口设备名即可。
+
+### 硬件组合速查
+
+| 场景 | 额外硬件 | 成本 | 核心验证 |
+|---|---|---|---|
+| 1 指令链判定 | 无 | ¥0 | 权限/能量限/门控/状态机/时延 |
+| 2 传感器模拟 | 杜邦线×1 | ¥0 | L4 包络/六态灯/值守独立性 |
+| 3 模拟量三态 | 10kΩ 电位器 | ~¥3 | T1 迟滞带/ABORTED 窗口 |
+| 4 执行器门控 | 继电器模块 | ~¥10 | 断线安全停止物理闭环 |
+| 5 电池值守 | 无 | ¥0 | ULP 深睡眠值守 |
+| 6 部署形态 | 上位机+排针线 | 视部署 | UART1 TTL 直连/断线必开 |
+
+## 5. 使用与配置指南
+
+### 5.1 动作表与角色(编译期固化 flash)
+
+编辑 `components/hex4_guard/guard_permissions.c`：
+动作表(ID/名称/角色位掩码/回调/参数域) + 角色表(role_id=位号/名称/密钥)。
+参数 def 可直接引用生成表 extern 数据：
 
 ```c
-#define GUARD_LINK_UART   UART_NUM_1
-#define GUARD_LINK_TX     17
-#define GUARD_LINK_RX     18
-#define GUARD_LINK_LOST_MS 5000     /* 部署形态: 断线安全停止启用 */
+static const guard_param_def_t motor_run_params[] = {
+    { .param_id = 1, .name = "tcp_speed", .kind = GUARD_PARAM_RANGE_LUT,
+      .lo = 0, .hi = 5, .lut_bounds = g_gen_lut_tcp_speed, .ref_param_id = 2 },
+    { .param_id = 2, .name = "payload", .kind = GUARD_PARAM_ENUM,
+      .lo = 0, .hi = 5, .enum_vals = g_gen_enum_payload },
+    /* ... door(ENUM) / force(COND, ref=mode) / mode(ENUM) */
+};
 ```
 
-**RK3588 侧**(直接复用本仓库脚本逻辑, 换串口设备名即可):
+回调契约: `action_xxx()`(同步 ≤100ms, 0=成功) 与 `action_abort_all()`
+(线程安全/幂等, 可与执行回调并发)。
+
+### 5.2 物理约束包(DSL → 验证 → 生成)
 
 ```bash
-python3 guard_keepalive.py /dev/ttyS1        # 每 1s ping 保活 (防断线红灯)
-python3 guard_cmd.py /dev/ttyS1 motor_run operator speed=50
-# 注意: ROLES/ACTIONS 表与设备侧 guard_permissions.c 保持一致 (生产经 eFuse 注入)
+cd esp32s3_hex4_guard/tools
+python3 smt_compile.py iso_constraints/demo_collab.yaml     # 验证+生成+报告
+python3 smt_compile.py iso_constraints/demo_collab.yaml --check   # CI: 防生成物漂移
 ```
 
-**上位机职责**(按 §4 协议):
+编辑约束包(`iso_constraints/*.yaml`)三部分：
 
-1. 上电后轮询 ping, 直到回执 `selftest=PASS`(设备就绪信号);
-2. 每 1s ping 保活(断线窗口 5s, 超时设备自动紧急停止 + 红灯锁存);
-3. 发执行类指令前检查 `state.sensor`(T2/TC 会被设备拒为 DENY/L4, 可提前规避);
+1. **约束条目**(形状封闭集 `range/enum/combine2/when/ltl`)，如能量限降维:
+   ```yaml
+   - id: TS15066-5.5-1
+     source: "ISO/TS 15066 §5.5.5 (瞬态接触能量限值)"
+     shape: combine2
+     expr: "0.5 * payload * tcp_speed^2 <= 0.01"   # ½·m·v² ≤ 10mJ 演示取值
+     bucket_var: payload
+     bucket_domain: [0, 1, 2, 5, 10]
+     out_param: tcp_speed
+   ```
+2. **状态机段**(initial/command_events/deny/transitions, from 可 `*` 通配):
+   ```yaml
+   state_machine:
+     initial: IDLE
+     command_events:
+       - { event: operator_ack }
+       - { event: mode_switch, param: mode }
+     deny:
+       ESTOP_LATCH: [any_motion]
+     transitions:
+       - { from: "*", event: estop_release, to: ESTOP_LATCH }
+       - { from: ESTOP_LATCH, event: operator_ack, to: IDLE }
+   ```
+3. **coverage 段**(适用条款清单 = 覆盖率分母 + 排除原因)。
+
+生成物写入 `components/hex4_guard/generated/`(入库)；报告写入 `docs/reports/`。
+验证全 PASS 才生成——冲突条款/不可达状态/LTL 违例/通配歧义均拒绝编译。
+
+### 5.3 角色密钥与量产安全
+
+开发形态为明文测试密钥(`.rodata`)。量产三步(流程详见设计文档 §8.6)：
+
+```bash
+# ① 每角色 32B 密钥烧入 eFuse (KEY_PURPOSE=USER)
+espefuse.py -p /dev/ttyACM1 burn_key BLOCK_KEY0 keys/operator.key KEY_PURPOSE_0 USER
+# ② 锁读保护 (不可逆)
+espefuse.py -p /dev/ttyACM1 burn_efuse RD_DIS
+# ③ Flash Encryption (Development 验证 → FLASH_CRYPT_CNT 转 Release)
+```
+
+威胁模型要点: **不烧 DIS_DOWNLOAD_MODE**(硬件保持可重烧)、Secure Boot 不启用
+(固件整体重写攻击与"换一块板子"等效, 由物理防护承担)——Flash Encryption 与
+RD_DIS 是仅有的电子防线, 两者缺一不可。
+
+### 5.4 上位机侧要点
+
+1. 上电后轮询 ping 直到回执 `selftest=PASS`(设备就绪信号);
+2. 每 1s ping 保活(断线窗口 5s, 超时设备紧急停止 + 红灯锁存 + 状态机锁存);
+3. 发执行类指令前检查 `state.sensor` 与 `state.sm`(T2/锁存态会被拒, 可提前规避);
 4. 回执是唯一事实来源: `ALLOW+exec_ok=true`=已执行, `DENY`=未执行,
-   `ABORTED`=执行中被物理中止。
+   `ABORTED`=执行中被物理中止; `state.sm=ESTOP_LATCH` 时须先发 `operator_ack`;
+5. 签名与规范编码参考 `tools/guard_cmd.py`(canon 序 = 动作表声明序, 键入顺序无关)。
 
-**与开发调试形态的差异**:
-
-| 项 | 开发调试(§2.4) | 部署形态(本节) |
-|---|---|---|
-| 指令链路 | UART0 经板载 CH343(USB) | UART1 排针 TTL 直连上位机 |
-| 日志 console | USB-Serial-JTAG(USB2) | 同左(排针仅走指令) |
-| 断线检测 | 可按需置 0 | **5000ms 必开**(安全停止) |
-| 传感器 | 杜邦线模拟 | 真实传感器接 GPIO1(ADC1_CH0) |
-| 门控输出 | 仅灯 | 灯 + 门控 GPIO 接执行器使能端(外部默认安全电平) |
-
-## 3. 使用方集成
-
-1. **定义动作集与权限表** — 编辑 `components/hex4_guard/guard_permissions.c`:
-   动作表(动作 ID/名称/角色位掩码/回调/参数域)、角色表(role_id=位号/名称/密钥引用);
-   参数域支持 `GUARD_PARAM_RANGE`(数值区间)与 `GUARD_PARAM_ENUM`(枚举集合)。
-2. **实现回调** — `action_xxx()`(同步 ≤100ms, 0=成功)与 `action_abort_all()`
-   (线程安全/幂等, 与执行回调可并发); 声明在 `guard_permissions.h` 尾部。
-3. **配置传感器** — demo 中 `hex4_ulp_cfg`(通道/阈值/值守周期, 建议 10ms);
-   `sensor_state_fn` 回传 ULP mailbox 三态供回执快照与 L4 判定。
-4. **上位机侧** — 按 §4 帧协议发指令(每 1s ping 保活), 解析回执;
-   规范编码与密钥签名参考 `tools/guard_cmd.py`。
-5. **模式切换** — `GUARD_LINK_LOST_MS`(断线窗口, 部署=5000/调试=0)、
-   `GUARD_LINK_UART`(UART0 开发调试/UART1 部署)。
-
-## 4. 帧协议摘要
+## 6. 帧协议摘要
 
 ```
 帧 = "HX" | 版本(1B, 兼密钥版本) | 类型(1B: 01=指令/02=回执)
-   | 长度(2B LE) | JSON 负载(≤480B) | CRC16(2B LE, 覆盖长度+负载, CCITT/XMODEM)
-指令 JSON: {seq, role, action, params, hmac}
-HMAC 规范字节串 = seq(4B LE)‖action_id(2B LE)‖role_id(1B)‖(param_id:1B‖value:4B LE)×N
+   | 长度(2B LE) | JSON 负载(≤480B) | CRC16(2B LE, CCITT/XMODEM)
+HMAC 输入 = seq(4B LE)‖action_id(2B LE)‖role_id(1B)‖(param_id:1B‖value:4B LE)×N
 回执 JSON: {seq, verdict(ALLOW|DENY|ABORTED), deny_layer, tc_source,
-            exec_ok?, state:{sensor}, diag_us?, led?, latched?}
+            exec_ok?, state:{sensor, sm}, diag_us?, led?, latched?, selftest}
 deny_layer: NONE|INTEGRITY|REPLAY|ENCODING|L3|L4|SELFTEST
 ```
 
 防重放: seq 单调窗口(回绕感知);重传同 seq 同内容 → 回缓存回执(不重入执行);
 同 seq 变种内容 → DENY/REPLAY。
 
-## 5. 测试
+## 7. 测试
 
 ```bash
-# host 单元测试 (零依赖, 141 项: 帧协议 94 + 判定链 47)
+# host 单元测试 (220 项: 帧协议 94 + 判定链 85 + 状态机 41)
 cd components/hex4_guard/host_tests && make test
+
+# 工具链 pytest (22 项: DSL/验证/LTL BMC/生成/报告/错误注入)
+cd tools/tests && python3 -m pytest test_smt_compile.py -q
 ```
 
-板级测试矩阵(已完成): 见 §6 实测记录; 故障注入开关 `GUARD_DEMO_SELFTEST_FAIL`
+板级测试矩阵见设计文档 §10;故障注入开关 `GUARD_DEMO_SELFTEST_FAIL`
 (demo 顶部宏, 置 1 模拟自检失败门控, 验证后恢复 0)。
 
-## 6. 实测记录(2026-08-17)
+## 8. 实测记录(2026-08)
 
 | 项 | 值 |
 |---|---|
-| 设备判定耗时 diag_us | 877~1016 µs(JSON+HMAC+L3+L4+回执, <2ms 达标) |
-| 端到端 RTT | ~106 ms(VMware USB 直通开销为主) |
-| L4 门控 | T2 → 执行类指令 DENY/L4;查询类(ping)仍可应答 |
+| 设备判定耗时 diag_us | 877~1338µs(JSON+HMAC+全部判定层+回执, <2ms 达标) |
+| 场景 A 演示 | 7/7 全过(能量限/安全门/协作力收紧/E-STOP 确认重启/时延回归) |
+| L4 门控 | T2 → 执行类 DENY/L4;ping 仍可应答 |
 | 防重放 | 重传幂等/变种 DENY/REPLAY/过旧 seq 拒绝 |
-| 灯态 | 绿 T0/黄 T1/红 T2/判定红一闪/断线红灯锁存/自检红闪 |
-| 断线 | 5s 无帧 → 紧急停止+红灯锁存,新帧解除 |
+| 灯态 | 绿/黄(T1)/红(T2 与判定)/红闪(TC)/橙闪(自检)/断线红灯锁存 |
+| 断线 | 5s 无帧 → 紧急停止 + 红灯锁存 + 状态机锁存;ack 恢复 |
+| 状态机 | 断线自动锁存/锁存态 DENY/ack 重启/mode 参数化转移/非法参数拒绝 |
 | 自检门控 | 故障注入下全拒执行(DENY/SELFTEST) |
 
 遗留验证(需专用硬件): 0 抖动与纯判定时延(逻辑分析仪)、TC 红闪与 ABORTED
 窄窗口(电位器抖动)、T1 黄灯精确阈值(电位器)。
-
-## 7. 量产密钥注入与安全启动指南
-
-> 开发形态密钥为测试密钥(明文 `.rodata`);量产必须按本节注入。
-
-### 7.1 威胁模型与目标
-
-| 风险 | 防护 | 状态 |
-|---|---|---|
-| 密钥随固件明文泄露(读 flash) | 密钥入 eFuse,烧写后锁 RD_DIS 不可读 | ✅ 必选 |
-| flash 固件/数据被离线读取 | Flash Encryption(读出为密文) | ✅ 量产启用 |
-| 整个固件被重写/替换(固件植入) | — | ❌ **排除出威胁模型**(见下) |
-| 物理拆片读 eFuse | — | ❌ 超出威胁模型(见文档 §6.6) |
-
-**威胁模型边界**: 攻击者物理接入串口下载模式并整体重写固件(固件替换)
-**不纳入本设备的安全考虑范围** —— 该路径与"攻击者直接换一块自己做的板子"
-等效,由部署环境的物理防护承担。因此 **Secure Boot V2 不启用**:
-其唯一防护对象(未签名固件引导)已排除。核心资产(指令授权)由角色密钥
-eFuse + RD_DIS 保护,该防护在恶意固件运行时依然有效(硬件级不可读)。
-
-### 7.2 角色密钥注入 eFuse
-
-**① 生成密钥**(每角色 32 字节,安全环境离线生成):
-
-```bash
-mkdir -p keys
-for r in operator maintenance supervisor; do
-  head -c 32 /dev/urandom > keys/${r}.key
-done
-```
-
-**② 烧写 BLOCK_KEY**(ESP32-S3 共 BLOCK_KEY0~5,每块 256-bit):
-
-```bash
-# 示例: operator→BLOCK_KEY0, maintenance→BLOCK_KEY1, supervisor→BLOCK_KEY2
-espefuse.py -p /dev/ttyACM1 burn_key BLOCK_KEY0 keys/operator.key    KEY_PURPOSE_0 USER
-espefuse.py -p /dev/ttyACM1 burn_key BLOCK_KEY1 keys/maintenance.key KEY_PURPOSE_1 USER
-espefuse.py -p /dev/ttyACM1 burn_key BLOCK_KEY2 keys/supervisor.key  KEY_PURPOSE_2 USER
-```
-
-**③ 锁定读保护**(烧写后立即执行,不可逆):
-
-```bash
-espefuse.py -p /dev/ttyACM1 burn_efuse RD_DIS   # 全部 BLOCK_KEY 不可读
-# 或细粒度: espefuse.py burn_bit BLOCK_KEY0_LOW_128 ... (按需)
-```
-
-**④ 固件侧读取**(替换 guard_permissions.c 中的明文测试密钥):
-
-```c
-#include "esp_efuse.h"
-static int role_key_from_efuse(esp_efuse_block_t block, uint8_t key[32]) {
-    return esp_efuse_read_block(block, key, 0, 32 * 8);
-}
-/* 启动时: role_key_from_efuse(EFUSE_BLK_KEY0, g_role_keys[0].key); ...
- * 注意: 角色表须改为可写缓冲 (开发形态 const 版本与量产形态二选一,
- * 量产形态仍应在 hex4_guard_init 前一次性写入, 之后不再修改) */
-```
-
-**⑤ 密钥轮换**: 帧头版本字节兼作密钥版本;过渡期上位机持新旧两把密钥,
-设备按版本字节择钥(BLOCK_KEY0/1 双槽);或简化为重烧。烧断的槽不可复用。
-
-### 7.3 Flash Encryption(固件/数据读取防护)
-
-**"不可逆"指 eFuse 安全位, 不是烧录能力**:
-
-- eFuse 是一次性可编程 (OTP): 烧过的 bit 不能再改回;
-- 锁定后**固件仍可反复烧录**, 但必须经 Flash Encryption 加密通道 (esptool 自动处理);
-- **全阶段策略: 不烧 `DIS_DOWNLOAD_MODE`** —— 保证硬件任何时候都可重新烧录,
-  下载接口防护由物理手段承担 (产线治具/外壳封印/接口不引出)。
-
-**放弃 DIS_DOWNLOAD_MODE 后的威胁评估**(下载模式 = 最强物理攻击通道, 防护正交):
-
-| 攻击手段 (经串口下载模式) | 无 eFuse 防护的后果 | 对应 eFuse 防线 |
-|---|---|---|
-| `read_flash` 读整个 flash | 固件/数据/明文密钥全泄露 | **Flash Encryption** (读出为密文) |
-| 读 eFuse 角色密钥 | 伪造任意角色指令 | **RD_DIS** (密钥不可读) |
-| `erase_flash` + 烧任意固件 | 恶意固件接管设备 | 排除出威胁模型 (物理防护承担) |
-
-> 结论: 不烧 `DIS_DOWNLOAD_MODE` 使攻击者获得稳定的物理攻击入口,
-> **Flash Encryption 与 RD_DIS 是仅有的电子防线, 两者缺一不可**;
-> 且与"随时重烧"完全兼容 (锁定后 idf.py flash 自动走加密通道, 流程不变)。
-
-**分层策略**(按产品阶段渐进, 每阶段可回退):
-
-| 阶段 | 配置 | 目的 |
-|---|---|---|
-| 开发调试 | 全部关闭 (当前 demo 状态) | 快速迭代 |
-| 试点/小批量 | 角色密钥 eFuse + RD_DIS (§7.2) | 认证强化 (核心资产) |
-| 量产 | + Flash Encryption Release | 固件/数据读取防护 |
-
-**量产流程**(在试点阶段全部功能验证通过后执行):
-
-```bash
-cd project
-# ① 启用 Flash Encryption (Development), 构建烧录并验证引导
-idf.py menuconfig   # Security features → Flash encryption → Enable (Development mode)
-idf.py build
-idf.py -p /dev/ttyACM1 flash monitor    # 验证引导正常 + 全用例对拍
-
-# ② Flash Encryption 转 Release: 此后 esptool 自动加密烧写 (不可逆)
-espefuse.py -p /dev/ttyACM1 burn_efuse FLASH_CRYPT_CNT
-idf.py -p /dev/ttyACM1 flash            # 验证加密通道烧录正常
-# 注意: 任何阶段都不烧 DIS_DOWNLOAD_MODE (保证硬件可重新烧录);
-#       Secure Boot 不启用 (固件替换攻击排除出威胁模型, 见 §7.1)
-```
-
-**锁定后的固件更新**(产线/售后路径):
-
-- 日常更新: `idf.py flash` 流程不变 —— esptool 自动加密写 (FE);
-- 售后返修: 下载模式永久保留 → 任何时候重烧即可 (OTA 仅作可选补充, 非唯一通道);
-- 密钥管理: FE 密钥在片内不可读; 角色密钥轮换见 §7.2⑤。
-
-### 7.4 产线注入顺序清单
-
-```
-① 烧写固件 (开发模式: 明文)
-② 烧写角色密钥 BLOCK_KEY0..2 (KEY_PURPOSE=USER)
-③ 烧 RD_DIS 锁密钥读保护
-④ 使能 Flash Encryption → 烧 FLASH_CRYPT_CNT 转 Release → 验证加密烧录
-⑤ 验证: 上电自检 PASS → 灯绿 → 上位机按角色签名指令对拍全过
-⑥ 终检: 拔线断线红灯、重连恢复、各角色越权/越界全拒
-   (任何阶段均不烧 DIS_DOWNLOAD_MODE, 硬件保持可重新烧录)
-```
-
-## 8. 开发状态
-
-**开发已完成**(2026-08-17): 帧协议 / 判定链 / ULP 值守 / 六态门控 / 执行闭环 /
-实测报告全部交付并板级验证;测试与实测数据见 §5/§6。
 
 ## 9. 许可
 

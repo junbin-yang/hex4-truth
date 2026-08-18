@@ -23,6 +23,7 @@ Thumbs.db
 esp32s3_hex4_guard/project/build/
 esp32s3_hex4_guard/components/hex4_guard/host_tests/test_guard_protocol
 esp32s3_hex4_guard/components/hex4_guard/host_tests/test_guard_judge
+esp32s3_hex4_guard/components/hex4_guard/host_tests/test_guard_state
 
 # Python cache
 __pycache__/
