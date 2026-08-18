@@ -1,0 +1,151 @@
+# 协作机器人演示约束包 (N1.1 骨架 + N1.4 条款提取的样例)
+# 设计文档: docs/ESP32-S3安全监控器物理约束形式化扩展设计文档.md §4.1/§6.1
+
+meta:
+  package: demo_collab
+  title: 协作机器人功率与力限制演示约束包
+
+# 动作清单（id 与设备侧动作表 action_id 对齐; class 供 when→deny 展开）
+actions:
+  - { id: 0, name: ping,        class: query }
+  - { id: 1, name: motor_run,   class: motion }
+  - { id: 2, name: motor_stop,  class: motion }
+
+# 参数声明（id 与动作表 params 的 param_id 对齐; 定点 = 物理值 × scale）
+params:
+  - { id: 1, name: tcp_speed,   unit: "m/s", scale: 1000 }
+  - { id: 2, name: payload,     unit: "kg",   scale: 1000 }
+  - { id: 3, name: tcp_force,   unit: "N",    scale: 1000 }
+  - { id: 4, name: safety_door, unit: "enum", scale: 1 }   # 0=closed, 1=open
+  - { id: 5, name: mode,        unit: "enum", scale: 1 }   # 0=auto, 1=manual, 2=collab
+
+# 状态/事件声明（N1.3 状态机使用）
+states: [IDLE, MANUAL, AUTO, COLLAB, ESTOP_LATCH]
+events: [mode_switch, estop_release, operator_ack, door_open, collision]
+
+# 状态机（N1.3）: 初始状态 / 上位机指令事件 / 状态下禁止动作 / 转移表
+# 转移匹配: from 可用 "*" 通配; param 省略 = 无参事件 (0xFFFF 通配)
+state_machine:
+  initial: IDLE
+  command_events:
+    - { event: operator_ack }              # E-STOP 确认重启 (无参)
+    - { event: mode_switch, param: mode }  # 运行模式切换 (参数值域 = mode ENUM)
+  deny:
+    ESTOP_LATCH: [any_motion]              # 锁存态禁止一切运动类动作
+  transitions:
+    - { from: IDLE,    event: mode_switch, param: 0, to: AUTO }
+    - { from: IDLE,    event: mode_switch, param: 1, to: MANUAL }
+    - { from: IDLE,    event: mode_switch, param: 2, to: COLLAB }
+    - { from: AUTO,    event: mode_switch, param: 1, to: MANUAL }
+    - { from: AUTO,    event: mode_switch, param: 2, to: COLLAB }
+    - { from: MANUAL,  event: mode_switch, param: 0, to: AUTO }
+    - { from: MANUAL,  event: mode_switch, param: 2, to: COLLAB }
+    - { from: COLLAB,  event: mode_switch, param: 0, to: AUTO }
+    - { from: COLLAB,  event: mode_switch, param: 1, to: MANUAL }
+    - { from: "*",     event: estop_release, to: ESTOP_LATCH }
+    - { from: ESTOP_LATCH, event: operator_ack, to: IDLE }
+    - { from: "*",     event: door_open, to: ESTOP_LATCH }
+    - { from: "*",     event: collision, to: ESTOP_LATCH }
+
+constraints:
+  # ---- 枚举定义（combine2 的 bucket 前置; 符号语义见注释）----
+  - id: ENUM-PAYLOAD-1
+    source: "ISO/TS 15066 §5.5.5 (载荷分档)"
+    shape: enum
+    var: payload
+    values: [0, 1, 2, 5, 10]            # kg, 定点 ×1000 由工具换算
+
+  - id: ENUM-DOOR-1
+    source: "ISO 10218-2 §5.3/§5.5.2 (防护装置联锁与安全门状态)"
+    shape: enum
+    var: safety_door
+    values: [0, 1]                      # 0=closed, 1=open
+
+  - id: ENUM-MODE-1
+    source: "ISO 10218-1 §5.7 (运行模式)"
+    shape: enum
+    var: mode
+    values: [0, 1, 2]                   # 0=auto, 1=manual, 2=collab
+
+  # ---- A 类: 单参数值域 ----
+  - id: S10218-1-5.12.3-1
+    source: "ISO 10218-1 §5.12.3"
+    shape: range
+    var: tcp_speed
+    lo: 0
+    hi: 0.25                            # m/s (= 250mm/s) → 定点 ×1000
+
+  - id: TS15066-5.5.4-1
+    source: "ISO/TS 15066 §5.5.4 (准静态接触力限值)"
+    shape: range
+    var: tcp_force
+    lo: 0
+    hi: 120                             # N → 定点 ×1000 (全模式基准域)
+
+  # ---- C 类: 跨参数组合约束（动能量限, 降维为 RANGE_LUT）----
+  - id: TS15066-5.5-1
+    source: "ISO 10218-1 §5.12.4 / ISO/TS 15066 §5.5.5 (功率与力限制, 能量)"
+    shape: combine2
+    expr: "0.5 * payload * tcp_speed^2 <= 0.01"   # ½·m·v² ≤ 10 mJ (演示取值)
+    bucket_var: payload
+    bucket_domain: [0, 1, 2, 5, 10]               # kg 分档（与 ENUM-PAYLOAD-1 一致）
+    out_param: tcp_speed
+
+  # ---- D 类: 条件约束（安全门联锁, 动作级）----
+  - id: S10218-2-5.5.2-1
+    source: "ISO 10218-2 §5.3/§5.5.2 (防护装置联锁)"
+    shape: when
+    when: { safety_door: [1] }          # 门开
+    then: { deny: any_motion }
+
+  # ---- D 类: 条件约束（协作模式力收紧, 参数级）----
+  - id: TS15066-5.5-2
+    source: "ISO/TS 15066 §5.5.4 (准静态接触力限值, 协作模式)"
+    shape: when
+    when: { mode: [2] }                 # collab
+    then: { restrict: { param: tcp_force, lo: 0, hi: 120 } }   # N → ×1000
+
+  # ---- D 类: 条件约束（手动模式降速, 参数级）----
+  - id: S10218-1-5.12.2-1
+    source: "ISO 10218-1 §5.12.2 (手动模式降速)"
+    shape: when
+    when: { mode: [1] }                 # manual
+    then: { restrict: { param: tcp_speed, lo: 0, hi: 0.1 } }   # m/s (=100mm/s) → ×1000
+
+  # ---- E 类: 时序约束（LTL, 由 z3 BMC 验证后落地为状态机转移表）----
+  - id: LTL-ESTOP-1
+    source: "ISO 10218-1 §5.5.5 / ISO 10218-1 §5.8 (E-STOP 确认重启与保护性停止)"
+    shape: ltl
+    spec: "G(!(ESTOP_LATCH & allow_motion))"      # 锁存态下运动类动作永不可执行
+  - id: LTL-DOOR-1
+    source: "ISO 10218-2 §5.3 (安全门联锁)"
+    shape: ltl
+    spec: "G(door_open -> X(ESTOP_LATCH))"        # 门开事件下一拍必入锁存态
+  - id: LTL-COLLISION-1
+    source: "ISO/TS 15066 §5.5.6 (碰撞后保护停止)"
+    shape: ltl
+    spec: "G(collision -> X(ESTOP_LATCH))"        # 碰撞事件下一拍必入锁存态
+  - id: LTL-REACH-1
+    source: "ISO 10218-1 §5.7 (模式可达性)"
+    shape: ltl
+    spec: "F(COLLAB)"                             # 协作模式自初始态可达
+
+# 覆盖率统计元数据（N1.4: 场景 A 适用条款清单 = 分母）
+# 口径: 适用条款 = 场景 A(协作机器人功率与力限制)范围内可软件化的规范性条款;
+# 条款号匹配以 source 文本中独立条款号为准; 完整条款矩阵见 docs/iso_clause_matrix.md
+coverage:
+  standard: "ISO 10218-1/2 + ISO/TS 15066"
+  applicable_clauses:
+    - { id: "10218-1 §5.5.5", topic: "急停功能与确认重启" }
+    - { id: "10218-1 §5.7",   topic: "运行模式选择" }
+    - { id: "10218-1 §5.8",   topic: "暂停与保护性停止" }
+    - { id: "10218-1 §5.12.2", topic: "手动模式降速" }
+    - { id: "10218-1 §5.12.4", topic: "功率与力限制" }
+    - { id: "10218-2 §5.3",   topic: "防护装置联锁" }
+    - { id: "TS 15066 §5.5.4", topic: "准静态接触力限值" }
+    - { id: "TS 15066 §5.5.5", topic: "瞬态接触能量限值" }
+    - { id: "TS 15066 §5.5.6", topic: "碰撞后保护停止" }
+  exclusions:
+    - { id: "TS 15066 §5.10", topic: "文档与培训", reason: "不可软件化 (管理类条款)" }
+    - { id: "10218-2 §5.7", topic: "光栅等硬线防护", reason: "GPIO 硬线输入为 V2 事件源, V1 仅模型" }
+    - { id: "10218-1 §5.10", topic: "轴限位", reason: "场景 A 参数集无位置量, V2 扩展" }
