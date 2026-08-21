@@ -31,3 +31,6 @@ __pycache__/
 # smt_compile pytest 临时产物 (每次运行重建)
 esp32s3_hex4_guard/tools/tests/fixtures/bad_*.yaml
 esp32s3_hex4_guard/tools/tests/fixtures/demo_pkg/
+
+# Third-party vendored projects (mclaw: kept local-only, tracked upstream separately)
+third_party/
