@@ -3,7 +3,7 @@
 """
 smt_compile.py — 物理约束形式化编译链 CLI 入口
 
-设计文档: docs/ESP32-S3安全监控器物理约束形式化扩展设计文档.md §4.2
+设计文档: docs/ESP32-S3安全监控器设计文档.md §6
 
 流水线: yaml(DSL) → smt_dsl 解析 → smt_verify 四项验证 → smt_codegen 生成
         → smt_report 两份报告

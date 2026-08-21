@@ -8,7 +8,7 @@
 > **实施状态**: 全部完成并板级实测。代码与演示见
 > [`esp32s3_hex4_guard/`](../esp32s3_hex4_guard/)。
 > **复用资产**: [`esp32s3_hex4_ulp/`](../esp32s3_hex4_ulp/)（ULP 三态值守）、
-> [`clib/`](../clib/)（LUT 判定链）、[`docs/YD-ESP32-S3-SCH-V1.4.pdf`](YD-ESP32-S3-SCH-V1.4.pdf)（硬件）。
+> [`clib/`](../clib/)（LUT 判定链）、[`YD-ESP32-S3-SCH-V1.4.pdf`](YD-ESP32-S3-SCH-V1.4.pdf)（硬件）。
 
 ---
 
@@ -203,15 +203,49 @@ DSL 直通记 N-A；取整方向天然保守正确。
 - `guard_state_gen.h/.c`：状态/事件枚举、转移表（GUARD_STATE_ANY 通配）、
   每状态 deny 位图、指令事件映射、初始状态；
 - `--check` 模式（CI）：重新生成与入库生成物比对，防"生成物与 DSL 漂移"；
-- 报告（`docs/reports/`，工具生成）：`smt_verify_report.md` 逐条验证记录、
+- 报告（`docs/reports/`，运行时生成、不入库）：`smt_verify_report.md` 逐条验证记录、
   `constraint_coverage_report.md` 条款→约束映射与覆盖率。
 
-### 6.4 覆盖率口径
+### 6.4 生成物与动作表/角色表的装配关系
+
+**DSL 生成的是"规则数据"，不生成动作表。** 物理约束包与手写配置的职责边界：
+
+```
+demo_collab.yaml (DSL: 条款约束 / 状态机段 / 覆盖率)
+   │  z3 四项验证 + LTL BMC 全 PASS 才生成, 否则拒绝编译
+   ▼
+generated/guard_constraints_gen.c/h + guard_state_gen.c/h   (数据数组, 入库)
+   │  手写动作表经 extern 符号引用: .lut_bounds = g_gen_lut_tcp_speed 等
+   ▼
+guard_permissions.c (手写: 动作表/角色表/参数装配) ──► 判定链运行时查表
+```
+
+| 配置内容 | 由谁管 | 说明 |
+|---|---|---|
+| 物理约束数值与条款 | DSL (yaml) | 需 z3 验证的"规则" |
+| 规则数据（LUT 边界/枚举集/when 集/动作门控表/状态机转移表） | 生成物 | 验证通过后的编译结果 |
+| 动作清单/动作 ID/角色权限/执行回调/参数挂哪种 shape | 手写 C | 动作语义与组织权限, DSL 不覆盖 |
+| 角色密钥 | 手写 C（生产 eFuse 注入） | 组织权限, 不在 DSL |
+
+**对齐约定**：DSL `actions.id` ↔ 动作表 `action_id`；DSL `params.id` ↔ 参数
+`param_id`（人工对齐, codegen 不校验）。换场景改动对照：
+
+| 改动类型 | 改哪里 |
+|---|---|
+| 只调约束数值/增删条款 | 只改 yaml → 重新 `smt_compile.py` 生成（手写 C 引用 extern 符号, 数据自动生效） |
+| 改角色/权限/密钥 | `guard_permissions.c`（DSL 不覆盖） |
+| 新增动作或参数 | 两边：yaml 加 params 声明与约束 + C 加动作表条目/参数 def/执行回调 |
+
+**"一参一槽"限制**（V1, 见 §11.5）：判定链每参数位置只挂一种 shape；生成物
+可为同一参数出多条 shape def（如 tcp_speed 有 RANGE/RANGE_LUT/COND 三条），
+装配时手写选择其一，未挂入动作表的约束由 host 测试局部表覆盖验证。
+
+### 6.5 覆盖率口径
 
 **覆盖率 = 已形式化条款数 / 适用条款总数**（目标 ≥90%）。分母 = 场景范围内
 **可表为数值/逻辑约束的规范性条款**（人工筛选，非全标准条款）；排除项逐条记录
 原因（不可软件化 / 超出封闭集 / V2 扩展）。完整条款矩阵见
-[`docs/iso_clause_matrix.md`](iso_clause_matrix.md)（含置信度标注：条款号与主题
+[`iso_clause_matrix.md`](iso_clause_matrix.md)（含置信度标注：条款号与主题
 基于标准公开结构整理，规范性数值为演示取值，正式引用前须对照标准原文核定）。
 
 ## 7. 状态机与 E-STOP 闭环（LTL 约束的运行时落点）
@@ -233,7 +267,8 @@ DSL 直通记 N-A；取整方向天然保守正确。
 
 1. **动作集与权限表** — `guard_permissions.c`：动作表（ID/名称/角色位掩码/回调/
    参数域）+ 角色表（role_id=位号/名称/密钥）；参数 def 可直接引用生成表 extern
-   数据（如 `.lut_bounds = g_gen_lut_tcp_speed`）；
+   数据（如 `.lut_bounds = g_gen_lut_tcp_speed`）；DSL 与手写表的职责边界、对齐
+   约定与换场景改动对照见 §6.4；
 2. **执行回调** — `action_xxx()`（同步 ≤100ms，0=成功）+ `action_abort_all()`
    （线程安全/幂等，与执行回调可并发）；
 3. **物理约束包** — 编写/修改 `tools/iso_constraints/*.yaml` → 运行

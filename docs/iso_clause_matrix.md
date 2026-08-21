@@ -22,7 +22,8 @@
 | 8 | ISO/TS 15066 §5.5.5 | 瞬态接触能量限值 | C | ENUM-PAYLOAD-1（载荷分档）+ TS15066-5.5-1 | ✅ 已形式化 |
 | 9 | ISO/TS 15066 §5.5.6 | 碰撞后保护停止 | E | LTL-COLLISION-1（G(碰撞→X(锁存)) + 转移表） | ✅ 已形式化 |
 
-**覆盖率 9/9 = 100%**（工具链自动统计，见 `docs/reports/constraint_coverage_report.md`）。
+**覆盖率 9/9 = 100%**（工具链自动统计，运行 `smt_compile.py` 后生成于
+`docs/reports/constraint_coverage_report.md`，不入库）。
 
 ## 2. 全标准候选清单（场景 A 范围外，供扩展）
 
@@ -72,4 +73,4 @@
 2. **形状类别判定**：基于条款公开语义归类，超出封闭集（>2 变量组合、非正则
    时序等）的条款无法 shape 化，列入 exclusions 并说明。
 3. **诚实性承诺**：本矩阵不虚构条款覆盖；每条"已形式化"均有对应 DSL 约束
-   条目与 z3 验证记录（`docs/reports/smt_verify_report.md`）可溯源。
+   条目与 z3 验证记录（`docs/reports/smt_verify_report.md`，运行时生成、不入库）可溯源。

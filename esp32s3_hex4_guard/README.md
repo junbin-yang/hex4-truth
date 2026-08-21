@@ -1,6 +1,6 @@
 # ESP32-S3 通用安全监控器 — 使用与配置指南
 
-> 设计文档: [`docs/ESP32-S3安全监控器设计文档.md`](../docs/ESP32-S3安全监控器设计文档.md)(v1.0 整合版)
+> 设计文档: [`../docs/ESP32-S3安全监控器设计文档.md`](../docs/ESP32-S3安全监控器设计文档.md)(v1.0 整合版)
 > 状态: **全部里程碑完成并板级实测**(2026-08);host 测试 220 项 + 工具链 pytest 22 项全绿。
 
 上位机经 UART 下发指令帧(CRC + 角色密钥 HMAC)，监控器完成确定性判定后
@@ -258,7 +258,20 @@ python3 smt_compile.py iso_constraints/demo_collab.yaml --check   # CI: 防生�
    ```
 3. **coverage 段**(适用条款清单 = 覆盖率分母 + 排除原因)。
 
-生成物写入 `components/hex4_guard/generated/`(入库)；报告写入 `docs/reports/`。
+生成物写入 `components/hex4_guard/generated/`(入库)；报告写入 `docs/reports/`
+(运行时生成, 不入库)。
+
+### 5.3 换场景改哪里速查
+
+DSL 生成"规则数据"(LUT/枚举/when 集/动作门控/状态机表), 动作表/角色表是
+手写装配层, 两者以 `actions.id`↔`action_id`、`params.id`↔`param_id` 对齐
+(设计文档 §6.4):
+
+| 改动 | 改哪里 | 是否重烧 |
+|---|---|---|
+| 只调物理约束数值(能量限/力限/加条款) | `tools/iso_constraints/*.yaml` → 重新 `smt_compile.py` | 要(表在 flash) |
+| 改角色/权限/密钥 | `guard_permissions.c` | 要 |
+| 新增动作/参数 | yaml 加声明与约束 + `guard_permissions.c` 加动作表/参数 def/回调 | 要 |
 验证全 PASS 才生成——冲突条款/不可达状态/LTL 违例/通配歧义均拒绝编译。
 
 ### 5.3 角色密钥与量产安全

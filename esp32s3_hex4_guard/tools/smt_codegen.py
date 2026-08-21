@@ -2,7 +2,7 @@
 """
 smt_codegen.py — 验证后的约束 → C 规则表生成器
 
-设计文档: docs/ESP32-S3安全监控器物理约束形式化扩展设计文档.md §4.2/§4.3
+设计文档: docs/ESP32-S3安全监控器设计文档.md §6.2/§6.3
 输出: guard_constraints_gen.h/.c（提交入库, 编译进 .rodata/flash）
 
 映射（每参数一个数组, 动作表 params 指针引用, param_count=数组长度）:

@@ -467,6 +467,6 @@ hex4_ulp_bench_print(&bench);         /* 输出对比表 */
 
 ## 相关文档
 
-- **快速上手(10 分钟拿对比数据/测试场景指南/量产测试环境)**:`esp32s3_hex4_ulp/project/README.md`
+- **快速上手(10 分钟拿对比数据/测试场景指南/量产测试环境)**:[`../../project/README.md`](../../project/README.md)
 - 使用用例工程:`esp32s3_hex4_ulp/project/`(`hex4_demo_main.c`,含四阶段测试场景)
 - HEX4-Truth 项目根:`../../`(clib / 技术白皮书 / hdl/rtl 三态运算核)

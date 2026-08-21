@@ -26,11 +26,11 @@ HEX4-Truth 在 HEX4-Lift v1.0 原生四种算术运算的基础上，扩展了
 
 | 目录 | 说明 |
 |------|------|
-| [`docs/`](docs/) | 技术白皮书：基础算术运算与扩展运算（HEX4-Truth）、[通用安全监控器开发文档](docs/ESP32-S3通用安全监控器开发文档.md) |
+| [`docs/`](docs/) | 技术白皮书：基础算术运算与扩展运算（HEX4-Truth）、[ESP32-S3安全监控器设计文档](docs/ESP32-S3安全监控器设计文档.md)、[ISO 条款形状化矩阵](docs/iso_clause_matrix.md)、[KaihongOS 课题4可行性评审](docs/KaihongOS课题4可行性评审.md) |
 | [`hdl/`](hdl/) | 三态运算核与仿真验证：`rtl/`、`tb/`（279 项单元测试）、`sim/`（Icarus Verilog 脚本） |
 | [`clib/`](clib/) | 纯 C 参考实现与测试（300 项，与 RTL 位级等价） |
 | [`esp32s3_hex4_ulp/`](esp32s3_hex4_ulp/) | ESP32-S3 ULP-RISC-V 三态确定性值守组件（µW 级、0 抖动） |
-| [`esp32s3_hex4_guard/`](esp32s3_hex4_guard/) | **通用安全监控器**（M1.1-M1.5 完成）：指令判定链 + ULP 并行值守 + 六态门控，[使用说明](esp32s3_hex4_guard/README.md) |
+| [`esp32s3_hex4_guard/`](esp32s3_hex4_guard/) | **通用安全监控器**（全部里程碑完成）：指令判定链 + ULP 并行值守 + 六态门控 + 物理约束形式化工具链，[使用说明](esp32s3_hex4_guard/README.md) |
 
 ## 快速开始
 

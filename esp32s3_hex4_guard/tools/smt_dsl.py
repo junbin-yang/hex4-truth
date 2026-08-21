@@ -2,7 +2,7 @@
 """
 smt_dsl.py — 物理约束 DSL 数据模型与解析层
 
-设计文档: docs/ESP32-S3安全监控器物理约束形式化扩展设计文档.md §4.1
+设计文档: docs/ESP32-S3安全监控器设计文档.md §6.1
 形状封闭集: range / enum / combine2 / when(deny|restrict) / ltl(N1.3)
 数值约定: 指令参数为定点整数, DSL 声明 unit+scale, 工具归一化并检查。
 """

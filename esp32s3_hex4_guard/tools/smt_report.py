@@ -2,7 +2,7 @@
 """
 smt_report.py — 验证报告与覆盖率报告生成
 
-设计文档: docs/ESP32-S3安全监控器物理约束形式化扩展设计文档.md §4.2/§4.6
+设计文档: docs/ESP32-S3安全监控器设计文档.md §6.2/§6.5
 输出:
   docs/reports/smt_verify_report.md          逐条约束四项验证记录
   docs/reports/constraint_coverage_report.md 条款→约束映射 + 覆盖率统计

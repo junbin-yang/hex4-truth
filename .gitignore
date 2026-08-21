@@ -34,3 +34,6 @@ esp32s3_hex4_guard/tools/tests/fixtures/demo_pkg/
 
 # Third-party vendored projects (mclaw: kept local-only, tracked upstream separately)
 third_party/
+
+# smt_compile 运行时报告 (每次运行重建, 不入库)
+docs/reports/
